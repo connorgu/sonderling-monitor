@@ -1,25 +1,26 @@
 name: Sonderling Monitor
 
+# Cron fires every 5 minutes (GitHub's minimum).  The script polls internally
+# every 20 seconds for 4.5 minutes (270 s), leaving a ~30-second gap before
+# the next run.  Max detection latency: 30 s gap + 20 s poll = 50 s < 60 s.
 on:
   schedule:
-    # GitHub Actions minimum is every 5 minutes in practice.
-    # The script polls internally every 30 s for 4 min per job,
-    # giving near-continuous coverage around the clock.
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch: {}   # allows manual trigger from the Actions tab
 
 permissions:
-  contents: write
+  contents: write         # needed to commit seen_items.json
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 10   # safety net; normal run is ~4.5 min
 
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -29,15 +30,16 @@ jobs:
           GMAIL_USER:         ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_EMAIL:        ${{ secrets.ALERT_EMAIL }}
-          # Poll every 30 s; loop for 4 min so runs overlap slightly
-          POLL_INTERVAL:      "30"
-          LOOP_DURATION:      "240"
+          GOOGLE_ALERTS_RSS:  ${{ secrets.GOOGLE_ALERTS_RSS }}
+          POLL_INTERVAL:      "20"
+          LOOP_DURATION:      "270"
         run: python sonderling_monitor.py
 
-      - name: Commit updated seen_items.json
+      - name: Persist seen items
+        if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add seen_items.json
           git diff --cached --quiet || git commit -m "chore: update seen items [skip ci]"
-          git push
+          git push || true
