@@ -139,29 +139,48 @@ def _smtp_connection():
     return server
 
 
+def _classify(item: dict) -> str:
+    """Guess the type of mention from title/source."""
+    title_lower = item["title"].lower()
+    source      = item["source"].lower()
+    if "reddit" in source:
+        return "social media post"
+    if any(w in title_lower for w in ("press release", "announces", "statement")):
+        return "press release"
+    if any(w in title_lower for w in ("interview", "op-ed", "opinion", "column")):
+        return "opinion piece"
+    return "media hit"
+
+
 def send_alert(items: list[dict]) -> None:
     gmail_user  = os.environ["GMAIL_USER"]
     alert_email = os.environ["ALERT_EMAIL"]
-    now_str     = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now_str     = datetime.now(timezone.utc).strftime("%B %d, %Y at %I:%M %p UTC")
 
     subject = (
-        f"[Sonderling Alert] {len(items)} new mention{'s' if len(items) != 1 else ''} "
-        f"— {now_str}"
+        f"New Mention Alert — Keith Sonderling "
+        f"({'1 item' if len(items) == 1 else f'{len(items)} items'})"
     )
 
-    lines = [
-        f"Keith Sonderling Media Alert",
-        f"Detected: {now_str}",
-        f"{'─' * 50}",
-        "",
-    ]
+    lines = []
     for it in items:
-        lines.append(f"HEADLINE : {it['title']}")
-        lines.append(f"SOURCE   : {it['source']}")
-        lines.append(f"PUBLISHED: {it['published'] or 'unknown'}")
-        lines.append(f"LINK     : {it['link']}")
-        lines.append("")
+        kind     = _classify(it)
+        pub_time = it["published"] or now_str
+        lines += [
+            f"Mr. Secretary Sonderling,",
+            f"",
+            f"A new {kind} has been released and your name is included.",
+            f"",
+            f"Headline  : {it['title']}",
+            f"Source    : {it['source']}",
+            f"Posted at : {pub_time}",
+            f"Link      : {it['link']}",
+            f"",
+            f"{'─' * 60}",
+            f"",
+        ]
 
+    lines.append(f"— Sonderling Monitor  |  Alert generated {now_str}")
     body = "\n".join(lines)
 
     msg = MIMEMultipart("alternative")
