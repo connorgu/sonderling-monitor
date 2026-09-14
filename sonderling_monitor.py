@@ -21,12 +21,16 @@ MAX_AGE_MINUTES = 30
 
 SEARCH_TERMS = [
     '"Keith Sonderling"',
-    '"secretary of labor" Sonderling',
-    '"labor secretary" Sonderling',
-    '"Sonderling"',
+    '"secretary of labor" "Sonderling"',
+    '"labor secretary" "Sonderling"',
+    '"department of labor" "Sonderling"',
+    '"DOL" "Keith Sonderling"',
+    '"Sonderling" "labor"',
 ]
 
-KEYWORDS = ["sonderling", "secretary of labor", "labor secretary"]
+# Matched against title+description for direct feeds.
+# Every item must contain "sonderling" — no generic labor secretary results.
+KEYWORDS = ["sonderling"]
 
 RSS_FEEDS = [
     ("https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en", "Google News"),
