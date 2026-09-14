@@ -328,19 +328,19 @@ def _build_body(item: dict) -> str:
 
 
 def send_alert(items: list[dict]) -> None:
-    """One individual email per item — no batching."""
-    gmail_user  = os.environ["GMAIL_USER"]
-    alert_email = os.environ["ALERT_EMAIL"]
+    """One individual email per item — no batching. Sends to all ALERT_EMAIL recipients."""
+    gmail_user = os.environ["GMAIL_USER"]
+    recipients = [e.strip() for e in os.environ["ALERT_EMAIL"].split(",") if e.strip()]
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
         srv.login(gmail_user, os.environ["GMAIL_APP_PASSWORD"])
         for item in items:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = f"New Mention — Keith Sonderling: {item['title'][:80]}"
             msg["From"]    = f"Sonderling Monitor <{gmail_user}>"
-            msg["To"]      = alert_email
+            msg["To"]      = ", ".join(recipients)
             msg.attach(MIMEText(_build_body(item), "plain"))
-            srv.sendmail(gmail_user, [alert_email], msg.as_string())
-            print(f"  [alert] → {alert_email}  [{item['source']}] {item['title'][:60]}")
+            srv.sendmail(gmail_user, recipients, msg.as_string())
+            print(f"  [alert] → {recipients}  [{item['source']}] {item['title'][:60]}")
 
 
 # ── Poll loop ─────────────────────────────────────────────────────────────────
