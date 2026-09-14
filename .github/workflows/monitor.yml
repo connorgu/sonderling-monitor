@@ -2,12 +2,14 @@ name: Sonderling Monitor
 
 on:
   schedule:
-    # Runs every 15 minutes
-    - cron: "*/15 * * * *"
-  workflow_dispatch: {}   # allows manual "Run workflow" button in the Actions tab
+    # GitHub Actions minimum is every 5 minutes in practice.
+    # The script polls internally every 30 s for 4 min per job,
+    # giving near-continuous coverage around the clock.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
 
 permissions:
-  contents: write         # needed to commit seen_items.json back to the repo
+  contents: write
 
 jobs:
   monitor:
@@ -27,7 +29,9 @@ jobs:
           GMAIL_USER:         ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_EMAIL:        ${{ secrets.ALERT_EMAIL }}
-          ALERT_SMS_GATEWAY:  ${{ secrets.ALERT_SMS_GATEWAY }}
+          # Poll every 30 s; loop for 4 min so runs overlap slightly
+          POLL_INTERVAL:      "30"
+          LOOP_DURATION:      "240"
         run: python sonderling_monitor.py
 
       - name: Commit updated seen_items.json
@@ -35,6 +39,5 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add seen_items.json
-          # Only commit if something actually changed
           git diff --cached --quiet || git commit -m "chore: update seen items [skip ci]"
           git push
