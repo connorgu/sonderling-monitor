@@ -20,16 +20,15 @@ from pathlib import Path
 MAX_AGE_MINUTES = 30
 
 SEARCH_TERMS = [
-    '"Keith Sonderling"',
-    '"secretary of labor" "Sonderling"',
-    '"labor secretary" "Sonderling"',
-    '"department of labor" "Sonderling"',
-    '"DOL" "Keith Sonderling"',
-    '"Sonderling" "labor"',
+    '"Keith Sonderling"',                    # his full name — most precise
+    '"Sonderling" "secretary of labor"',     # his surname + his title
+    '"Sonderling" "labor secretary"',        # his surname + common shorthand
+    '"Sonderling" "department of labor"',   # his surname + his department
+    '"Keith Sonderling" "DOL"',              # his full name + agency acronym
 ]
 
-# Matched against title+description for direct feeds.
-# Every item must contain "sonderling" — no generic labor secretary results.
+# Matched against title+description for direct outlet feeds (Tier 3).
+# "sonderling" MUST appear — blocks all generic DOL/labor content.
 KEYWORDS = ["sonderling"]
 
 RSS_FEEDS = [
