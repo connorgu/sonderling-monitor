@@ -3,13 +3,15 @@
 Keith Sonderling Media Monitor — 24/7 real-time alert system
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RECENCY GATE (strict): confirmed within MAX_AGE_MINUTES or DROPPED
-CONCURRENCY: all 40+ sources fetched in parallel every poll cycle
-SOURCES: Google News (×4 keywords), Bing News (×4), 30+ direct outlets,
-         Reddit (×4), Google Alerts RSS (×4)
-KEYWORDS: "Keith Sonderling" · "secretary of labor" · "labor secretary" · "Sonderling"
+CONCURRENCY: all 80+ sources fetched in parallel every poll cycle
+SOURCES: Google News (×5 keywords), Bing News (×5), 32 direct outlets,
+         Reddit (×5), Google Alerts RSS (×4),
+         DuckDuckGo Web (×7 queries), Bing Web (×5 queries)
+         — catches LinkedIn posts, X/Twitter posts, blog mentions
+KEYWORDS: "Keith Sonderling" · "Sonderling" + context
 LATENCY:  Cron every 5 min → polls every 20 s for 4.5 min → ≤ 50 s worst case
 """
-import json, os, smtplib, time, urllib.parse, urllib.request, xml.etree.ElementTree as ET
+import html as _html, json, os, re, smtplib, time, urllib.parse, urllib.request, xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
@@ -74,7 +76,15 @@ DIRECT_FEEDS = [
 _GA_RAW = os.environ.get("GOOGLE_ALERTS_RSS", "").strip()
 GOOGLE_ALERTS_FEEDS: list[str] = [u.strip() for u in _GA_RAW.split(",") if u.strip()]
 
-REDDIT_URL = "https://www.reddit.com/search.json?q={query}&sort=new&limit=25&type=link"
+REDDIT_URL    = "https://www.reddit.com/search.json?q={query}&sort=new&limit=25&type=link"
+DDG_WEB_URL   = "https://html.duckduckgo.com/html/?q={query}&kl=us-en"
+BING_WEB_URL  = "https://www.bing.com/search?q={query}&setlang=en&cc=US&first=1"
+
+# Extra queries aimed at social platforms — LinkedIn posts + X/Twitter indexed by search engines
+SOCIAL_SEARCH_TERMS = [
+    '"Keith Sonderling" site:linkedin.com',
+    '"Keith Sonderling" site:twitter.com OR site:x.com',
+]
 
 HEADERS = {
     "User-Agent": (
@@ -235,6 +245,78 @@ def _fetch_reddit(url: str) -> list[dict]:
     return items
 
 
+def _fetch_web_search(query: str, label: str) -> list[dict]:
+    """
+    Scrape DuckDuckGo HTML lite or Bing Web search results.
+    Surfaces LinkedIn posts, X/Twitter posts, and any publicly indexed content.
+    Uses current time as pub date (first-seen = alert once; seen_items dedup prevents repeats).
+    """
+    if "DuckDuckGo" in label:
+        url = DDG_WEB_URL.format(query=urllib.parse.quote(query))
+    else:
+        url = BING_WEB_URL.format(query=urllib.parse.quote(query))
+
+    raw = _get(url)
+    if not raw:
+        return []
+
+    now_pub = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+    items: list[dict] = []
+    text = raw.decode("utf-8", errors="replace")
+
+    def _clean(html_frag: str) -> str:
+        return _html.unescape(re.sub(r"<[^>]+>", "", html_frag)).strip()
+
+    try:
+        if "DuckDuckGo" in label:
+            # DDG HTML lite: <a class="result__a" href="/l/?uddg=<encoded_url>">Title</a>
+            #                <div class="result__snippet">Snippet text</div>
+            pairs = re.findall(
+                r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>'
+                r'.*?class="result__snippet"[^>]*>(.*?)</div>',
+                text, re.DOTALL,
+            )
+            for href, title_raw, snip_raw in pairs[:10]:
+                title = _clean(title_raw)
+                snip  = _clean(snip_raw)
+                # DDG wraps real URL in uddg= param
+                m = re.search(r"[?&]uddg=([^&]+)", href)
+                real = urllib.parse.unquote(m.group(1)) if m else href
+                if not real.startswith("http"):
+                    continue
+                if not any(kw in (title + " " + snip).lower() for kw in KEYWORDS):
+                    continue
+                items.append({
+                    "title": title, "link": _canonical(real),
+                    "published": now_pub, "source": label, "snippet": snip,
+                })
+
+        else:  # Bing Web
+            # Bing web: <h2><a href="https://...">Title</a></h2>
+            #           <div class="b_caption"><p>Snippet</p></div>
+            pairs = re.findall(
+                r'<h2[^>]*>\s*<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>\s*</h2>'
+                r'.*?<div[^>]+class="b_caption"[^>]*>.*?<p[^>]*>(.*?)</p>',
+                text, re.DOTALL,
+            )
+            for href, title_raw, snip_raw in pairs[:10]:
+                if "bing.com" in href:
+                    continue
+                title = _clean(title_raw)
+                snip  = _clean(snip_raw)
+                if not any(kw in (title + " " + snip).lower() for kw in KEYWORDS):
+                    continue
+                items.append({
+                    "title": title, "link": _canonical(href),
+                    "published": now_pub, "source": label, "snippet": snip,
+                })
+
+    except Exception as exc:
+        print(f"  [warn] web-search parse ({label}): {exc}")
+
+    return items
+
+
 # ── Concurrent fetch ──────────────────────────────────────────────────────────
 
 def fetch_all(seen: set[str]) -> list[dict]:
@@ -261,6 +343,13 @@ def fetch_all(seen: set[str]) -> list[dict]:
     for ga_url in GOOGLE_ALERTS_FEEDS:
         tasks.append(("rss", ga_url, "Google Alerts", False))
 
+    # Web search: DuckDuckGo + Bing — surfaces LinkedIn, X/Twitter, blogs
+    for term in SEARCH_TERMS:
+        tasks.append(("web", term, "DuckDuckGo Web", None))
+        tasks.append(("web", term, "Bing Web",       None))
+    for term in SOCIAL_SEARCH_TERMS:
+        tasks.append(("web", term, "DuckDuckGo Web", None))
+
     print(f"  [fetch] launching {len(tasks)} concurrent requests …")
 
     raw_items: list[dict] = []
@@ -269,8 +358,10 @@ def fetch_all(seen: set[str]) -> list[dict]:
         for kind, url, label, kw_filter in tasks:
             if kind == "rss":
                 futures.append(pool.submit(_fetch_rss, url, label, kw_filter))
-            else:
+            elif kind == "reddit":
                 futures.append(pool.submit(_fetch_reddit, url))
+            else:  # web
+                futures.append(pool.submit(_fetch_web_search, url, label))
         for fut in as_completed(futures):
             try:
                 raw_items.extend(fut.result())
@@ -303,11 +394,14 @@ def fetch_all(seen: set[str]) -> list[dict]:
 def _classify(item: dict) -> str:
     t = item["title"].lower()
     s = item["source"].lower()
-    if "reddit"  in s: return "social media post"
-    if any(w in t for w in ("press release", "announces", "statement", "launches")): return "press release"
-    if any(w in t for w in ("interview", "op-ed", "opinion", "column", "commentary")): return "opinion piece"
-    if any(w in t for w in ("podcast", "episode", "listen")): return "podcast mention"
-    if "youtube" in s or "c-span" in s: return "video segment"
+    l = item.get("link", "").lower()
+    if "linkedin.com" in l:                                                    return "LinkedIn post"
+    if "twitter.com" in l or "x.com" in l:                                    return "X (Twitter) post"
+    if "reddit" in s or "reddit.com" in l:                                     return "Reddit post"
+    if "youtube" in l or "c-span" in s:                                        return "video segment"
+    if any(w in t for w in ("press release", "announces", "statement")):       return "press release"
+    if any(w in t for w in ("interview", "op-ed", "opinion", "column")):       return "opinion piece"
+    if any(w in t for w in ("podcast", "episode", "listen")):                  return "podcast mention"
     return "media hit"
 
 
@@ -322,6 +416,11 @@ def _build_body(item: dict) -> str:
         f"Source    : {item['source']}",
         f"Posted at : {item['published'] or now_str}",
         f"Link      : {item['link']}",
+    ]
+    snippet = item.get("snippet", "").strip()
+    if snippet:
+        lines += ["", f"Preview   : {snippet[:300]}"]
+    lines += [
         "",
         "─" * 60,
         "",
@@ -363,15 +462,18 @@ def main() -> None:
     start  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=MAX_AGE_MINUTES)).strftime("%H:%M UTC")
 
-    tier1 = len(RSS_FEEDS) * len(SEARCH_TERMS)
-    reddit = len(SEARCH_TERMS)
-    total  = tier1 + reddit + len(DIRECT_FEEDS) + len(GOOGLE_ALERTS_FEEDS)
+    tier1   = len(RSS_FEEDS) * len(SEARCH_TERMS)
+    reddit  = len(SEARCH_TERMS)
+    web_ddg = len(SEARCH_TERMS) + len(SOCIAL_SEARCH_TERMS)
+    web_bing = len(SEARCH_TERMS)
+    total   = tier1 + reddit + len(DIRECT_FEEDS) + len(GOOGLE_ALERTS_FEEDS) + web_ddg + web_bing
 
     print(f"[start] {start}")
     print(f"[start] {len(seen)} previously seen items")
     print(f"[start] Recency gate: >{MAX_AGE_MINUTES} min old = dropped  (cutoff: {cutoff})")
-    print(f"[start] {tier1} search feeds + {reddit} Reddit + {len(DIRECT_FEEDS)} direct outlets "
-          f"+ {len(GOOGLE_ALERTS_FEEDS)} Google Alerts = {total} sources (all concurrent)")
+    print(f"[start] {tier1} news feeds + {reddit} Reddit + {len(DIRECT_FEEDS)} outlets "
+          f"+ {len(GOOGLE_ALERTS_FEEDS)} Google Alerts "
+          f"+ {web_ddg} DuckDuckGo Web + {web_bing} Bing Web = {total} sources (all concurrent)")
     if not GOOGLE_ALERTS_FEEDS:
         print("[start] WARNING: GOOGLE_ALERTS_RSS not set — add GitHub secret for full-web coverage")
     print(f"[start] Poll every {POLL_INTERVAL}s for {LOOP_DURATION}s | {MAX_WORKERS} workers")
