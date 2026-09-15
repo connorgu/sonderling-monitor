@@ -146,6 +146,48 @@ def save_seen(seen: set[str]) -> None:
     SEEN_FILE.write_text(json.dumps(sorted(seen), indent=2))
 
 
+# ── Snippet date extractor ────────────────────────────────────────────────────
+
+def _parse_snippet_date(text: str) -> str | None:
+    """
+    Extract a real publication date from web search result text.
+    DDG and Bing both show age indicators like '4 minutes ago', '2 hours ago',
+    or absolute dates like 'Sep 15, 2026' directly in their HTML results.
+    Returns an RFC-2822 date string if found, None otherwise.
+    """
+    now = datetime.now(timezone.utc)
+
+    m = re.search(r'(\d+)\s+minute[s]?\s+ago', text, re.IGNORECASE)
+    if m:
+        return (now - timedelta(minutes=int(m.group(1)))).strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+    m = re.search(r'(\d+)\s+hour[s]?\s+ago', text, re.IGNORECASE)
+    if m:
+        return (now - timedelta(hours=int(m.group(1)))).strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+    m = re.search(r'(\d+)\s+day[s]?\s+ago', text, re.IGNORECASE)
+    if m:
+        return (now - timedelta(days=int(m.group(1)))).strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+    # "Sep 15, 2026" / "September 15, 2026" / "15 Sep 2026"
+    m = re.search(
+        r'(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|'
+        r'Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
+        r'\.?\s+(\d{1,2}),?\s+(\d{4})',
+        text, re.IGNORECASE,
+    )
+    if m:
+        try:
+            dt = datetime.strptime(
+                f"{m.group(1)[:3].capitalize()} {int(m.group(2)):02d} {m.group(3)}", "%b %d %Y"
+            )
+            return dt.replace(tzinfo=timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+        except Exception:
+            pass
+
+    return None
+
+
 # ── Twitter/X snowflake date decoder ─────────────────────────────────────────
 
 def _tweet_age_minutes(url: str) -> float | None:
@@ -268,8 +310,12 @@ def _fetch_reddit(url: str) -> list[dict]:
 def _fetch_web_search(query: str, label: str) -> list[dict]:
     """
     Scrape DuckDuckGo HTML lite or Bing Web search results.
-    Surfaces LinkedIn posts, X/Twitter posts, and any publicly indexed content.
-    Uses current time as pub date (first-seen = alert once; seen_items dedup prevents repeats).
+
+    DATE POLICY — three-tier, strict:
+      1. Twitter/X: snowflake ID decoded to exact minute — drop if > MAX_AGE_MINUTES.
+      2. Other URLs: parse date from DDG result__timestamp / Bing news_dt element,
+         then from the full snippet text.  Drop if > MAX_AGE_MINUTES.
+      3. No date recoverable at all: DROP.  Never assume "now" for unknown-age content.
     """
     if "DuckDuckGo" in label:
         url = DDG_WEB_URL.format(query=urllib.parse.quote(query))
@@ -280,7 +326,6 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
     if not raw:
         return []
 
-    now_pub = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
     items: list[dict] = []
     text = raw.decode("utf-8", errors="replace")
 
@@ -289,14 +334,17 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
 
     try:
         if "DuckDuckGo" in label:
-            # DDG HTML lite: <a class="result__a" href="/l/?uddg=<encoded_url>">Title</a>
-            #                <div class="result__snippet">Snippet text</div>
+            # DDG HTML lite structure:
+            #   <a class="result__a" href="/l/?uddg=<url>">Title</a>
+            #   optionally: <span class="result__timestamp">4 minutes ago</span>
+            #   <div class="result__snippet">snippet text</div>
             pairs = re.findall(
                 r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>'
-                r'.*?class="result__snippet"[^>]*>(.*?)</div>',
+                r'(.*?)'                                      # block between title and snippet
+                r'class="result__snippet"[^>]*>(.*?)</div>',
                 text, re.DOTALL,
             )
-            for href, title_raw, snip_raw in pairs[:10]:
+            for href, title_raw, middle, snip_raw in pairs[:10]:
                 title = _clean(title_raw)
                 snip  = _clean(snip_raw)
                 # DDG wraps real URL in uddg= param
@@ -306,19 +354,35 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
                     continue
                 if not any(kw in (title + " " + snip).lower() for kw in KEYWORDS):
                     continue
-                # Twitter/X: verify real age from snowflake ID — immune to search engine errors
+
+                # ── DATE VERIFICATION (strictest path first) ──────────────────
+                # 1. Twitter/X: decode snowflake ID
                 tweet_age = _tweet_age_minutes(real)
-                if tweet_age is not None and tweet_age > MAX_AGE_MINUTES:
-                    print(f"    [drop-old-tweet {tweet_age:.0f}m] {title[:60]}")
-                    continue
+                if tweet_age is not None:
+                    if tweet_age > MAX_AGE_MINUTES:
+                        print(f"    [drop-old-tweet {tweet_age:.0f}m] {title[:60]}")
+                        continue
+                    pub = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+                else:
+                    # 2. Try DDG's result__timestamp span, then full snippet text
+                    ts_span = re.search(r'class="result__timestamp"[^>]*>(.*?)</span>', middle, re.DOTALL)
+                    ts_text = _clean(ts_span.group(1)) if ts_span else ""
+                    pub = _parse_snippet_date(ts_text) or _parse_snippet_date(snip)
+                    if not pub:
+                        # 3. No verifiable date — drop rather than risk old content
+                        print(f"    [drop-nodate-web] {label}: {title[:60]}")
+                        continue
+
                 items.append({
                     "title": title, "link": _canonical(real),
-                    "published": now_pub, "source": label, "snippet": snip,
+                    "published": pub, "source": label, "snippet": snip,
                 })
 
         else:  # Bing Web
-            # Bing web: <h2><a href="https://...">Title</a></h2>
-            #           <div class="b_caption"><p>Snippet</p></div>
+            # Bing web structure:
+            #   <h2><a href="https://...">Title</a></h2>
+            #   <div class="b_caption"><p><span class="news_dt">4 min ago</span> snippet</p></div>
             pairs = re.findall(
                 r'<h2[^>]*>\s*<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>\s*</h2>'
                 r'.*?<div[^>]+class="b_caption"[^>]*>.*?<p[^>]*>(.*?)</p>',
@@ -327,17 +391,32 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
             for href, title_raw, snip_raw in pairs[:10]:
                 if "bing.com" in href:
                     continue
-                title = _clean(title_raw)
-                snip  = _clean(snip_raw)
+                title    = _clean(title_raw)
+                snip_raw_clean = snip_raw  # keep HTML for news_dt extraction
+                snip     = _clean(snip_raw)
                 if not any(kw in (title + " " + snip).lower() for kw in KEYWORDS):
                     continue
+
+                # ── DATE VERIFICATION ─────────────────────────────────────────
                 tweet_age = _tweet_age_minutes(href)
-                if tweet_age is not None and tweet_age > MAX_AGE_MINUTES:
-                    print(f"    [drop-old-tweet {tweet_age:.0f}m] {title[:60]}")
-                    continue
+                if tweet_age is not None:
+                    if tweet_age > MAX_AGE_MINUTES:
+                        print(f"    [drop-old-tweet {tweet_age:.0f}m] {title[:60]}")
+                        continue
+                    pub = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+                else:
+                    # Try Bing's news_dt span first, then full snippet text
+                    dt_span = re.search(r'class="news_dt"[^>]*>(.*?)</span>', snip_raw_clean, re.DOTALL)
+                    dt_text = _clean(dt_span.group(1)) if dt_span else ""
+                    pub = _parse_snippet_date(dt_text) or _parse_snippet_date(snip)
+                    if not pub:
+                        print(f"    [drop-nodate-web] {label}: {title[:60]}")
+                        continue
+
                 items.append({
                     "title": title, "link": _canonical(href),
-                    "published": now_pub, "source": label, "snippet": snip,
+                    "published": pub, "source": label, "snippet": snip,
                 })
 
     except Exception as exc:
