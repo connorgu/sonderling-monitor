@@ -146,6 +146,26 @@ def save_seen(seen: set[str]) -> None:
     SEEN_FILE.write_text(json.dumps(sorted(seen), indent=2))
 
 
+# ── Twitter/X snowflake date decoder ─────────────────────────────────────────
+
+def _tweet_age_minutes(url: str) -> float | None:
+    """
+    Twitter encodes the exact publish timestamp inside every tweet ID (snowflake).
+    This lets us verify age with 100% accuracy — no guessing, no search engine claims.
+    Returns age in minutes, or None if URL is not a tweet.
+    """
+    m = re.search(r'(?:twitter\.com|x\.com)/\w+/status(?:es)?/(\d+)', url)
+    if not m:
+        return None
+    try:
+        tweet_id = int(m.group(1))
+        ts_ms  = (tweet_id >> 22) + 1288834974657   # Twitter epoch offset
+        pub_dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+        return (datetime.now(timezone.utc) - pub_dt).total_seconds() / 60
+    except Exception:
+        return None
+
+
 # ── Network ───────────────────────────────────────────────────────────────────
 
 def _get(url: str) -> bytes | None:
@@ -286,6 +306,11 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
                     continue
                 if not any(kw in (title + " " + snip).lower() for kw in KEYWORDS):
                     continue
+                # Twitter/X: verify real age from snowflake ID — immune to search engine errors
+                tweet_age = _tweet_age_minutes(real)
+                if tweet_age is not None and tweet_age > MAX_AGE_MINUTES:
+                    print(f"    [drop-old-tweet {tweet_age:.0f}m] {title[:60]}")
+                    continue
                 items.append({
                     "title": title, "link": _canonical(real),
                     "published": now_pub, "source": label, "snippet": snip,
@@ -305,6 +330,10 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
                 title = _clean(title_raw)
                 snip  = _clean(snip_raw)
                 if not any(kw in (title + " " + snip).lower() for kw in KEYWORDS):
+                    continue
+                tweet_age = _tweet_age_minutes(href)
+                if tweet_age is not None and tweet_age > MAX_AGE_MINUTES:
+                    print(f"    [drop-old-tweet {tweet_age:.0f}m] {title[:60]}")
                     continue
                 items.append({
                     "title": title, "link": _canonical(href),
