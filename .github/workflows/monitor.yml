@@ -1,20 +1,25 @@
 name: Sonderling Monitor
 
-# Cron fires every 5 minutes (GitHub's minimum).  The script polls internally
-# every 20 seconds for 4.5 minutes (270 s), leaving a ~30-second gap before
-# the next run.  Max detection latency: 30 s gap + 20 s poll = 50 s < 60 s.
+# PRIMARY: each run self-dispatches the next one after finishing (no gap > 30s)
+# BACKUP:  cron fires every 5 min in case the self-dispatch chain ever breaks
 on:
   schedule:
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}   # allows manual trigger from the Actions tab
+  workflow_dispatch: {}
+
+# Only one run at a time — queue the next, never cancel a running job
+concurrency:
+  group: sonderling-monitor
+  cancel-in-progress: false
 
 permissions:
-  contents: write         # needed to commit seen_items.json
+  contents: write   # commit seen_items.json
+  actions:  write   # self-dispatch next run
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10   # safety net; normal run is ~4.5 min
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -42,4 +47,13 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add seen_items.json
           git diff --cached --quiet || git commit -m "chore: update seen items [skip ci]"
-          git push || true
+          git pull --rebase origin main || true
+          git push origin main || true
+
+      - name: Trigger next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sleep 20
+          gh workflow run monitor.yml --ref main
