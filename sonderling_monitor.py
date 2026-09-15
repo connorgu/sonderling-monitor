@@ -24,11 +24,16 @@ MAX_AGE_MINUTES     = 30   # RSS, Reddit, Twitter/X — real timestamps, tight g
 WEB_MAX_AGE_MINUTES = 60   # Web search (LinkedIn, blogs) — search engine indexing lag
 
 SEARCH_TERMS = [
-    '"Keith Sonderling"',                    # his full name — most precise
-    '"Sonderling" "secretary of labor"',     # his surname + his title
-    '"Sonderling" "labor secretary"',        # his surname + common shorthand
-    '"Sonderling" "department of labor"',   # his surname + his department
-    '"Keith Sonderling" "DOL"',              # his full name + agency acronym
+    '"Keith Sonderling"',                          # full name — most precise
+    '"Secretary Sonderling"',                      # how press refers to cabinet members
+    '"Sonderling" "secretary of labor"',           # surname + formal title
+    '"Sonderling" "labor secretary"',              # surname + common shorthand
+    '"Keith Sonderling" "secretary of labor"',     # full name + formal title
+    '"Keith Sonderling" "labor secretary"',        # full name + common shorthand
+    '"Sonderling" "department of labor"',          # surname + department name
+    '"Keith Sonderling" "department of labor"',    # full name + department name
+    '"Keith Sonderling" "DOL"',                    # full name + acronym
+    '"Sonderling" "DOL"',                          # surname + acronym
 ]
 
 # Matched against title+description for direct outlet feeds (Tier 3).
