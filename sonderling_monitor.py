@@ -2,10 +2,11 @@
 """
 Keith Sonderling Media Monitor — 24/7 real-time alert system
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RECENCY GATE (strict): confirmed within MAX_AGE_MINUTES or DROPPED
-CONCURRENCY: all 80+ sources fetched in parallel every poll cycle
-SOURCES: Google News (×5 keywords), Bing News (×5), 32 direct outlets,
-         Reddit (×5), Google Alerts RSS (×4),
+RECENCY GATE: RSS/Twitter/Reddit → 30 min hard gate (real timestamps)
+              Web search (LinkedIn/blogs) → 60 min gate (search-engine indexed)
+CONCURRENCY: all 100+ sources fetched in parallel every poll cycle
+SOURCES: Google News (×5 keywords), Bing News (×5), 42 direct outlets,
+         Reddit (×5), Google Alerts RSS (×4+),
          DuckDuckGo Web (×7 queries), Bing Web (×5 queries)
          — catches LinkedIn posts, X/Twitter posts, blog mentions
 KEYWORDS: "Keith Sonderling" · "Sonderling" + context
@@ -19,7 +20,8 @@ from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-MAX_AGE_MINUTES = 30
+MAX_AGE_MINUTES     = 30   # RSS, Reddit, Twitter/X — real timestamps, tight gate
+WEB_MAX_AGE_MINUTES = 60   # Web search (LinkedIn, blogs) — search engine indexing lag
 
 SEARCH_TERMS = [
     '"Keith Sonderling"',                    # his full name — most precise
@@ -71,6 +73,17 @@ DIRECT_FEEDS = [
     ("https://finance.yahoo.com/news/rssindex",                  "Yahoo Finance"),
     ("https://news.yahoo.com/rss/politics",                      "Yahoo Politics"),
     ("https://www.c-span.org/feeds/clips.rss",                   "C-SPAN"),
+    # ── Additional outlets ────────────────────────────────────────────────────
+    ("https://feeds.bloomberg.com/politics/news.rss",            "Bloomberg Politics"),
+    ("https://www.cnbc.com/id/100003114/device/rss/rss.html",    "CNBC"),
+    ("https://www.cnbc.com/id/10000664/device/rss/rss.html",     "CNBC Economy"),
+    ("https://dailycaller.com/feed/",                            "Daily Caller"),
+    ("https://www.washingtonexaminer.com/feed",                  "Washington Examiner"),
+    ("https://www.dailywire.com/feeds/rss.xml",                  "Daily Wire"),
+    ("https://thefederalist.com/feed/",                          "The Federalist"),
+    ("https://www.newsmax.com/rss/Politics/16/",                 "Newsmax"),
+    ("https://www.washingtontimes.com/rss/headlines/news/politics/", "Washington Times"),
+    ("https://www.newsweek.com/rss",                             "Newsweek"),
 ]
 
 _GA_RAW = os.environ.get("GOOGLE_ALERTS_RSS", "").strip()
@@ -373,6 +386,15 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
                         # 3. No verifiable date — drop rather than risk old content
                         print(f"    [drop-nodate-web] {label}: {title[:60]}")
                         continue
+                    # Use the looser web gate (60 min) — allows for indexing lag
+                    from email.utils import parsedate_to_datetime as _p2dt
+                    try:
+                        _age = (datetime.now(timezone.utc) - _p2dt(pub)).total_seconds() / 60
+                        if _age > WEB_MAX_AGE_MINUTES:
+                            print(f"    [drop-old-web {_age:.0f}m] {label}: {title[:60]}")
+                            continue
+                    except Exception:
+                        pass
 
                 items.append({
                     "title": title, "link": _canonical(real),
@@ -413,6 +435,14 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
                     if not pub:
                         print(f"    [drop-nodate-web] {label}: {title[:60]}")
                         continue
+                    from email.utils import parsedate_to_datetime as _p2dt
+                    try:
+                        _age = (datetime.now(timezone.utc) - _p2dt(pub)).total_seconds() / 60
+                        if _age > WEB_MAX_AGE_MINUTES:
+                            print(f"    [drop-old-web {_age:.0f}m] {label}: {title[:60]}")
+                            continue
+                    except Exception:
+                        pass
 
                 items.append({
                     "title": title, "link": _canonical(href),
@@ -537,6 +567,21 @@ def _build_body(item: dict) -> str:
     return "\n".join(lines)
 
 
+def _subject_tag(item: dict) -> str:
+    """Short prefix so the email source is visible before opening."""
+    l = item.get("link", "").lower()
+    s = item["source"].lower()
+    if "linkedin.com"               in l: return "[LINKEDIN]"
+    if "twitter.com" in l or "x.com" in l: return "[X/TWITTER]"
+    if "reddit.com"  in l or "reddit" in s: return "[REDDIT]"
+    if "google alerts"              in s: return "[GOOGLE ALERT]"
+    if "duckduckgo"  in s or "bing web" in s: return "[WEB]"
+    if "whitehouse.gov"             in l: return "[WHITE HOUSE]"
+    if "dol.gov"                    in l: return "[DEPT OF LABOR]"
+    if "congress.gov"               in l: return "[CONGRESS]"
+    return f"[{item['source'].upper()[:14]}]"
+
+
 def send_alert(items: list[dict]) -> None:
     """One individual email per item — no batching. Sends to all ALERT_EMAIL recipients."""
     gmail_user = os.environ["GMAIL_USER"]
@@ -544,8 +589,9 @@ def send_alert(items: list[dict]) -> None:
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
         srv.login(gmail_user, os.environ["GMAIL_APP_PASSWORD"])
         for item in items:
+            tag = _subject_tag(item)
             msg = MIMEMultipart("alternative")
-            msg["Subject"] = f"New Mention — Keith Sonderling: {item['title'][:80]}"
+            msg["Subject"] = f"{tag} Keith Sonderling: {item['title'][:80]}"
             msg["From"]    = f"Sonderling Monitor <{gmail_user}>"
             msg["To"]      = ", ".join(recipients)
             msg.attach(MIMEText(_build_body(item), "plain"))
