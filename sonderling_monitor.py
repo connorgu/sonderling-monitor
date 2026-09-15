@@ -77,8 +77,8 @@ _GA_RAW = os.environ.get("GOOGLE_ALERTS_RSS", "").strip()
 GOOGLE_ALERTS_FEEDS: list[str] = [u.strip() for u in _GA_RAW.split(",") if u.strip()]
 
 REDDIT_URL    = "https://www.reddit.com/search.json?q={query}&sort=new&limit=25&type=link"
-DDG_WEB_URL   = "https://html.duckduckgo.com/html/?q={query}&kl=us-en"
-BING_WEB_URL  = "https://www.bing.com/search?q={query}&setlang=en&cc=US&first=1"
+DDG_WEB_URL   = "https://html.duckduckgo.com/html/?q={query}&kl=us-en&df=d"
+BING_WEB_URL  = "https://www.bing.com/search?q={query}&setlang=en&cc=US&first=1&freshness=Day"
 
 # Extra queries aimed at social platforms — LinkedIn posts + X/Twitter indexed by search engines
 SOCIAL_SEARCH_TERMS = [
