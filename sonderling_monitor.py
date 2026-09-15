@@ -12,6 +12,7 @@ SOURCES: Google News (×5 keywords), Bing News (×5), 42 direct outlets,
 KEYWORDS: "Keith Sonderling" · "Sonderling" + context
 LATENCY:  Cron every 5 min → polls every 20 s for 4.5 min → ≤ 50 s worst case
 """
+from __future__ import annotations
 import html as _html, json, os, re, smtplib, time, urllib.parse, urllib.request, xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -39,6 +40,10 @@ SEARCH_TERMS = [
 # Matched against title+description for direct outlet feeds (Tier 3).
 # "sonderling" MUST appear — blocks all generic DOL/labor content.
 KEYWORDS = ["sonderling"]
+
+# DOL.gov and White House may announce the Secretary by title without spelling the surname.
+DOL_HIGH_VALUE_LABELS = {"Dept of Labor", "White House"}
+DOL_EXTRA_KEYWORDS    = ["secretary of labor", "labor secretary"]
 
 RSS_FEEDS = [
     ("https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en", "Google News"),
@@ -89,12 +94,16 @@ DIRECT_FEEDS = [
     ("https://www.newsmax.com/rss/Politics/16/",                 "Newsmax"),
     ("https://www.washingtontimes.com/rss/headlines/news/politics/", "Washington Times"),
     ("https://www.newsweek.com/rss",                             "Newsweek"),
+    # ── Labor / HR specialty ─────────────────────────────────────────────────────
+    ("https://news.bloomberglaw.com/rss/daily-labor-report",    "Bloomberg Daily Labor"),
+    ("https://www.hrdive.com/feeds/news/",                      "HR Dive"),
+    ("https://ogletree.com/feed/",                              "Ogletree Deakins"),
 ]
 
 _GA_RAW = os.environ.get("GOOGLE_ALERTS_RSS", "").strip()
 GOOGLE_ALERTS_FEEDS: list[str] = [u.strip() for u in _GA_RAW.split(",") if u.strip()]
 
-REDDIT_URL    = "https://www.reddit.com/search.json?q={query}&sort=new&limit=25&type=link"
+REDDIT_URL    = "https://www.reddit.com/search.json?q={query}&sort=new&limit=25"
 DDG_WEB_URL   = "https://html.duckduckgo.com/html/?q={query}&kl=us-en&df=d"
 BING_WEB_URL  = "https://www.bing.com/search?q={query}&setlang=en&cc=US&first=1&freshness=Day"
 
@@ -151,17 +160,26 @@ def _is_recent(pub_str: str, label: str = "", title: str = "") -> bool:
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
-def load_seen() -> set[str]:
+def load_seen() -> dict[str, str]:
     if SEEN_FILE.exists():
         try:
-            return set(json.loads(SEEN_FILE.read_text()))
+            data = json.loads(SEEN_FILE.read_text())
+            if isinstance(data, list):
+                now_iso = datetime.now(timezone.utc).isoformat()
+                return {url: now_iso for url in data if isinstance(url, str)}
+            if isinstance(data, dict):
+                return data
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
-    return set()
+    return {}
 
 
-def save_seen(seen: set[str]) -> None:
-    SEEN_FILE.write_text(json.dumps(sorted(seen), indent=2))
+def save_seen(seen: dict[str, str]) -> None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    pruned = {url: ts for url, ts in seen.items() if ts >= cutoff}
+    if len(pruned) > 5000:
+        pruned = dict(sorted(pruned.items(), key=lambda x: x[1])[-5000:])
+    SEEN_FILE.write_text(json.dumps(pruned, indent=2))
 
 
 # ── Snippet date extractor ────────────────────────────────────────────────────
@@ -174,6 +192,25 @@ def _parse_snippet_date(text: str) -> str | None:
     Returns an RFC-2822 date string if found, None otherwise.
     """
     now = datetime.now(timezone.utc)
+
+    # ISO datetime: 2026-09-15T13:45:00Z or 2026-09-15 13:45
+    m = re.search(r'(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?', text)
+    if m:
+        try:
+            dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                          int(m.group(4)), int(m.group(5)), tzinfo=timezone.utc)
+            return dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
+        except Exception:
+            pass
+
+    # ISO date-only: 2026-09-15 (day precision; age computed from midnight UTC)
+    m = re.search(r'(\d{4})-(\d{2})-(\d{2})(?!\d)', text)
+    if m:
+        try:
+            dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc)
+            return dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
+        except Exception:
+            pass
 
     m = re.search(r'(\d+)\s+minute[s]?\s+ago', text, re.IGNORECASE)
     if m:
@@ -229,13 +266,17 @@ def _tweet_age_minutes(url: str) -> float | None:
 # ── Network ───────────────────────────────────────────────────────────────────
 
 def _get(url: str) -> bytes | None:
-    try:
-        req = urllib.request.Request(url, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return r.read()
-    except Exception as exc:
-        print(f"  [warn] {url[:80]}  →  {exc}")
-        return None
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.read()
+        except Exception as exc:
+            if attempt == 1:
+                print(f"  [warn] {url[:80]}  →  {exc}")
+            else:
+                time.sleep(3)
+    return None
 
 
 def _canonical(url: str) -> str:
@@ -286,7 +327,11 @@ def _fetch_rss(url: str, label: str, keyword_filter: bool) -> list[dict]:
         title = (item.findtext("title") or "").strip()
         desc  = (item.findtext("description") or "").strip()
         if keyword_filter:
-            if not any(kw in (title + " " + desc).lower() for kw in KEYWORDS):
+            text_lower = (title + " " + desc).lower()
+            passes = any(kw in text_lower for kw in KEYWORDS)
+            if not passes and label in DOL_HIGH_VALUE_LABELS:
+                passes = any(kw in text_lower for kw in DOL_EXTRA_KEYWORDS)
+            if not passes:
                 continue
         items.append({
             "title":     title,
@@ -462,7 +507,7 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
 
 # ── Concurrent fetch ──────────────────────────────────────────────────────────
 
-def fetch_all(seen: set[str]) -> list[dict]:
+def fetch_all(seen: dict[str, str]) -> list[dict]:
     """
     Fire all source requests in parallel, then apply the dedup pipeline:
       1. seen_items.json check (cross-run dedup)
@@ -492,6 +537,7 @@ def fetch_all(seen: set[str]) -> list[dict]:
         tasks.append(("web", term, "Bing Web",       None))
     for term in SOCIAL_SEARCH_TERMS:
         tasks.append(("web", term, "DuckDuckGo Web", None))
+        tasks.append(("web", term, "Bing Web",       None))
 
     print(f"  [fetch] launching {len(tasks)} concurrent requests …")
 
@@ -606,17 +652,21 @@ def send_alert(items: list[dict]) -> None:
 
 # ── Poll loop ─────────────────────────────────────────────────────────────────
 
-def poll_once(seen: set[str]) -> tuple[set[str], int]:
+def poll_once(seen: dict[str, str]) -> tuple[dict[str, str], int]:
     new_items = fetch_all(seen)
     if new_items:
         send_alert(new_items)
+        now_iso = datetime.now(timezone.utc).isoformat()
         for it in new_items:
-            seen.add(it["link"])
+            seen[it["link"]] = now_iso
         save_seen(seen)
     return seen, len(new_items)
 
 
 def main() -> None:
+    for key in ("GMAIL_USER", "GMAIL_APP_PASSWORD", "ALERT_EMAIL"):
+        if not os.environ.get(key):
+            raise RuntimeError(f"Required secret {key!r} is not set in environment")
     seen   = load_seen()
     start  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=MAX_AGE_MINUTES)).strftime("%H:%M UTC")

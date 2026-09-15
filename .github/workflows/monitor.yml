@@ -19,7 +19,7 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
 
     steps:
       - name: Checkout
@@ -40,6 +40,14 @@ jobs:
           LOOP_DURATION:      "270"
         run: python sonderling_monitor.py
 
+      - name: Trigger next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sleep 5
+          gh workflow run monitor.yml --ref main
+
       - name: Persist seen items
         if: always()
         run: |
@@ -49,11 +57,3 @@ jobs:
           git diff --cached --quiet || git commit -m "chore: update seen items [skip ci]"
           git pull --rebase origin main || true
           git push origin main || true
-
-      - name: Trigger next run
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          sleep 20
-          gh workflow run monitor.yml --ref main
