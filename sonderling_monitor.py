@@ -522,7 +522,7 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
     for term in SEARCH_TERMS:
         enc = urllib.parse.quote(term)
         for tmpl, label in RSS_FEEDS:
-            tasks.append(("rss", tmpl.format(query=enc), label, False))
+            tasks.append(("rss", tmpl.format(query=enc), label, True))
         tasks.append(("reddit", REDDIT_URL.format(query=enc), "Reddit", None))
 
     for url, label in DIRECT_FEEDS:
