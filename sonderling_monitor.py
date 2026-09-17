@@ -13,7 +13,7 @@ KEYWORDS: "Keith Sonderling" · "Sonderling" + context
 LATENCY:  Cron every 5 min → polls every 20 s for 4.5 min → ≤ 50 s worst case
 """
 from __future__ import annotations
-import html as _html, json, os, re, smtplib, time, urllib.parse, urllib.request, xml.etree.ElementTree as ET
+import base64, html as _html, json, os, re, smtplib, time, urllib.parse, urllib.request, xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
@@ -180,6 +180,61 @@ def save_seen(seen: dict[str, str]) -> None:
     if len(pruned) > 5000:
         pruned = dict(sorted(pruned.items(), key=lambda x: x[1])[-5000:])
     SEEN_FILE.write_text(json.dumps(pruned, indent=2))
+
+
+def _sync_seen_from_github() -> None:
+    """On Railway startup, pull seen_items.json from GitHub to restore dedup state."""
+    token = os.environ.get("GH_TOKEN", "")
+    if not token:
+        return
+    try:
+        url = "https://api.github.com/repos/connorgu/sonderling-monitor/contents/seen_items.json"
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "SonderlingMonitor/1.0",
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        content = base64.b64decode(data["content"]).decode()
+        SEEN_FILE.write_text(content)
+        print(f"[startup] Synced seen_items.json from GitHub ({len(json.loads(content))} entries)")
+    except Exception as exc:
+        print(f"[startup] Could not sync seen_items.json from GitHub: {exc} — starting fresh")
+
+
+def _push_seen_to_github(seen: dict[str, str]) -> None:
+    """Push seen_items.json to GitHub after each alert (Railway mode dedup persistence)."""
+    token = os.environ.get("GH_TOKEN", "")
+    if not token:
+        return
+    try:
+        url = "https://api.github.com/repos/connorgu/sonderling-monitor/contents/seen_items.json"
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "SonderlingMonitor/1.0",
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            current = json.loads(r.read())
+        sha = current.get("sha", "")
+        content_b64 = base64.b64encode(SEEN_FILE.read_bytes()).decode()
+        body = json.dumps({
+            "message": "chore: update seen items [skip ci]",
+            "content": content_b64,
+            "sha": sha,
+        }).encode()
+        req2 = urllib.request.Request(url, data=body, method="PUT", headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "User-Agent": "SonderlingMonitor/1.0",
+        })
+        with urllib.request.urlopen(req2, timeout=10) as r2:
+            r2.read()
+        print(f"  [sync] Pushed seen_items.json to GitHub")
+    except Exception as exc:
+        print(f"  [sync] Could not push seen_items.json to GitHub: {exc}")
 
 
 # ── Snippet date extractor ────────────────────────────────────────────────────
@@ -660,6 +715,8 @@ def poll_once(seen: dict[str, str]) -> tuple[dict[str, str], int]:
         for it in new_items:
             seen[it["link"]] = now_iso
         save_seen(seen)
+        if LOOP_DURATION == 0:
+            _push_seen_to_github(seen)
     return seen, len(new_items)
 
 
@@ -667,6 +724,10 @@ def main() -> None:
     for key in ("GMAIL_USER", "GMAIL_APP_PASSWORD", "ALERT_EMAIL"):
         if not os.environ.get(key):
             raise RuntimeError(f"Required secret {key!r} is not set in environment")
+    if LOOP_DURATION == 0 and not os.environ.get("GH_TOKEN"):
+        print("[warn] GH_TOKEN not set — seen_items.json will not persist to GitHub across redeploys")
+    if LOOP_DURATION == 0:
+        _sync_seen_from_github()
     seen   = load_seen()
     start  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=MAX_AGE_MINUTES)).strftime("%H:%M UTC")
@@ -685,9 +746,10 @@ def main() -> None:
           f"+ {web_ddg} DuckDuckGo Web + {web_bing} Bing Web = {total} sources (all concurrent)")
     if not GOOGLE_ALERTS_FEEDS:
         print("[start] WARNING: GOOGLE_ALERTS_RSS not set — add GitHub secret for full-web coverage")
-    print(f"[start] Poll every {POLL_INTERVAL}s for {LOOP_DURATION}s | {MAX_WORKERS} workers")
+    mode_str = "∞ (Railway persistent)" if LOOP_DURATION == 0 else f"{LOOP_DURATION}s"
+    print(f"[start] Poll every {POLL_INTERVAL}s for {mode_str} | {MAX_WORKERS} workers")
 
-    deadline  = time.monotonic() + LOOP_DURATION
+    deadline  = float("inf") if LOOP_DURATION == 0 else time.monotonic() + LOOP_DURATION
     total_new = 0
 
     while True:
@@ -700,7 +762,8 @@ def main() -> None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        sleep_for = max(0.0, min(POLL_INTERVAL - (time.monotonic() - t0), remaining))
+        sleep_for = (max(0.0, POLL_INTERVAL - (time.monotonic() - t0)) if deadline == float("inf")
+                     else max(0.0, min(POLL_INTERVAL - (time.monotonic() - t0), remaining)))
         if sleep_for > 0:
             print(f"[poll] sleeping {sleep_for:.0f}s …")
             time.sleep(sleep_for)

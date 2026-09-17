@@ -1,25 +1,20 @@
-name: Sonderling Monitor
+name: Sonderling Monitor (backup)
 
-# PRIMARY: each run self-dispatches the next one after finishing (no gap > 30s)
-# BACKUP:  cron fires every 5 min in case the self-dispatch chain ever breaks
+# BACKUP ONLY — Railway is the primary 24/7 scanner.
+# This cron fires ~every 5 min as a fallback in case Railway goes down.
+# No self-triggering chain here — avoids burning GitHub Actions minutes.
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
-# Only one run at a time — queue the next, never cancel a running job
-concurrency:
-  group: sonderling-monitor
-  cancel-in-progress: false
-
 permissions:
   contents: write   # commit seen_items.json
-  actions:  write   # self-dispatch next run
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 8
 
     steps:
       - name: Checkout
@@ -39,12 +34,6 @@ jobs:
           POLL_INTERVAL:      "15"
           LOOP_DURATION:      "270"
         run: python sonderling_monitor.py
-
-      - name: Trigger next run
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run monitor.yml --ref main
 
       - name: Persist seen items
         if: always()
