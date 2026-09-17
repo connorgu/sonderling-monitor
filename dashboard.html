@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonderling Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+:root {
+  --bg:      #050810;
+  --panel:   #080e1c;
+  --panel2:  #0b1322;
+  --line:    #111d35;
+  --line2:   #0d1628;
+  --text:    #c8d4e8;
+  --dim:     #3a4f6a;
+  --mid:     #6b82a0;
+  --accent:  #e8a020;
+  --ok:      #2ecc8a;
+  --fail:    #e85555;
+  --info:    #4d9fff;
+  --warn:    #f0b429;
+  --mono: 'JetBrains Mono', 'Courier New', monospace;
+}
+*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 13px; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Dot-grid background */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: radial-gradient(circle, #1a2840 1px, transparent 1px);
+  background-size: 28px 28px;
+  opacity: 0.3;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Radial vignette */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 35%, rgba(5,8,16,0.75) 100%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.wrap { position: relative; z-index: 2; }
+
+/* ── TICKER ── */
+.ticker {
+  background: var(--accent);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  height: 26px;
+}
+.ticker-tag {
+  flex-shrink: 0;
+  padding: 0 14px;
+  border-right: 1px solid rgba(0,0,0,0.3);
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: .2em;
+  color: #050810;
+  white-space: nowrap;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+.ticker-track { flex: 1; overflow: hidden; height: 100%; display: flex; align-items: center; }
+.ticker-inner {
+  display: flex;
+  white-space: nowrap;
+  animation: scroll-left 38s linear infinite;
+}
+.ticker-inner span {
+  padding: 0 28px;
+  font-size: 0.56rem;
+  font-weight: 600;
+  letter-spacing: .1em;
+  color: rgba(5,8,16,0.72);
+}
+@keyframes scroll-left { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+/* ── HEADER ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line2);
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.brand-name {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: .14em;
+  color: var(--text);
+}
+.brand-name em { color: var(--accent); font-style: normal; }
+.brand-sub {
+  font-size: 0.56rem;
+  color: var(--dim);
+  letter-spacing: .08em;
+  margin-top: 3px;
+}
+.header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.live-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  padding: 5px 12px;
+  background: var(--panel);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: .12em;
+}
+.pulse {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: beat 2.2s ease-in-out infinite;
+}
+@keyframes beat {
+  0%,100% { opacity:1; box-shadow: 0 0 0 0 rgba(46,204,138,.5); }
+  50%      { opacity:.5; box-shadow: 0 0 0 5px rgba(46,204,138,0); }
+}
+.pulse.dead { background: var(--fail); animation: none; }
+.pulse.warn { background: var(--warn); }
+
+.timer-label { font-size: 0.56rem; color: var(--dim); text-align: right; line-height: 1.7; }
+
+.btn {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--mid);
+  font-family: var(--mono);
+  font-size: 0.54rem;
+  letter-spacing: .1em;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.btn:hover { border-color: var(--mid); color: var(--text); }
+.btn:focus-visible { outline: 1px solid var(--accent); }
+
+/* ── STAT TILES ── */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-bottom: 1px solid var(--line2);
+  background: var(--line2);
+  gap: 1px;
+}
+@media (max-width: 680px) { .tiles { grid-template-columns: repeat(2,1fr); } }
+
+.tile { background: var(--panel); padding: 22px 20px 16px; }
+.tile-label {
+  font-size: 0.52rem;
+  letter-spacing: .18em;
+  color: var(--dim);
+  margin-bottom: 10px;
+}
+.tile-val {
+  font-size: 2.1rem;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 5px;
+  color: var(--text);
+}
+.tile-detail { font-size: 0.6rem; color: var(--mid); }
+
+/* ── MAIN GRID ── */
+.main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  background: var(--line2);
+  gap: 1px;
+}
+@media (max-width: 720px) { .main { grid-template-columns: 1fr; } }
+
+.col { background: var(--panel); }
+.col-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line2);
+}
+.col-title { font-size: 0.56rem; font-weight: 700; letter-spacing: .16em; color: var(--mid); }
+.col-meta  { font-size: 0.54rem; color: var(--dim); }
+.col-body  { overflow-y: auto; max-height: 380px; }
+
+/* ── RUN ROWS ── */
+.run {
+  display: grid;
+  grid-template-columns: 58px 1fr 60px 58px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--line2);
+  font-size: 0.63rem;
+}
+.run:last-child { border-bottom: none; }
+.run:hover { background: rgba(255,255,255,0.02); }
+
+.run-event { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-ago   { color: var(--dim);  font-size: 0.56rem; }
+.run-dur   { color: var(--mid);  font-size: 0.56rem; text-align: right; }
+
+.badge {
+  display: inline-block;
+  padding: 1px 5px;
+  font-size: 0.5rem;
+  font-weight: 700;
+  letter-spacing: .07em;
+}
+.b-ok   { background: rgba(46,204,138,.12); color: var(--ok); }
+.b-fail { background: rgba(232,85,85,.12);  color: var(--fail); }
+.b-run  { background: rgba(77,159,255,.12); color: var(--info); }
+.b-mute { background: rgba(100,120,150,.07); color: var(--dim); }
+
+/* ── ALERT ROWS ── */
+.alert {
+  padding: 11px 18px;
+  border-bottom: 1px solid var(--line2);
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.alert:last-child { border-bottom: none; }
+.alert:hover { background: rgba(255,255,255,0.02); }
+
+.adot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-top: 6px;
+  flex-shrink: 0;
+}
+.alert-inner { flex: 1; min-width: 0; }
+.alert-when { font-size: 0.54rem; color: var(--dim); margin-bottom: 2px; }
+.alert-body { font-size: 0.68rem; color: var(--text); line-height: 1.4; }
+.alert-sha  { font-size: 0.52rem; color: var(--dim); margin-top: 2px; }
+
+/* ── CHART ── */
+.chart-wrap {
+  background: var(--panel);
+  border-top: 1px solid var(--line2);
+}
+.chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line2);
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chart-legend { font-size: 0.54rem; color: var(--dim); display: flex; gap: 14px; align-items: center; }
+.ld { display: inline-block; width: 8px; height: 8px; margin-right: 4px; vertical-align: middle; }
+.chart-canvas { padding: 14px 18px 8px; }
+
+/* ── SOURCES ── */
+.sources {
+  padding: 16px 22px 22px;
+  border-top: 1px solid var(--line2);
+}
+.src-label { font-size: 0.52rem; letter-spacing: .18em; color: var(--dim); margin-bottom: 10px; }
+.src-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip {
+  font-size: 0.54rem;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  color: var(--mid);
+  background: var(--panel2);
+}
+.chip.term { color: rgba(232,160,32,.7); border-color: rgba(232,160,32,.18); }
+
+/* ── LOADING / ERROR ── */
+.spinner-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 30px;
+  font-size: 0.6rem;
+  color: var(--dim);
+  letter-spacing: .1em;
+}
+.spin {
+  width: 14px; height: 14px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: rotate .7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes rotate { to { transform: rotate(360deg); } }
+
+.err-box {
+  margin: 12px;
+  padding: 12px 14px;
+  background: rgba(232,85,85,.08);
+  border: 1px solid rgba(232,85,85,.25);
+  font-size: 0.63rem;
+  color: var(--fail);
+  line-height: 1.6;
+}
+
+/* ── TOKEN OVERLAY ── */
+.tok-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5,8,16,.96);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+.tok-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 36px;
+  max-width: 400px;
+  width: 100%;
+}
+.tok-card h2 {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: .18em;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.tok-card p { font-size: 0.68rem; color: var(--mid); line-height: 1.7; margin-bottom: 20px; }
+.tok-in {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  padding: 9px 11px;
+  margin-bottom: 10px;
+  outline: none;
+  letter-spacing: .03em;
+}
+.tok-in:focus { border-color: var(--accent); }
+.tok-in::placeholder { color: var(--dim); }
+.tok-btn {
+  width: 100%;
+  background: var(--accent);
+  color: #050810;
+  border: none;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: .16em;
+  padding: 11px;
+  cursor: pointer;
+}
+.tok-btn:hover { filter: brightness(1.1); }
+.tok-hint { font-size: 0.54rem; color: var(--dim); margin-top: 10px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- TICKER -->
+  <div class="ticker">
+    <div class="ticker-tag">LIVE · MONITORING</div>
+    <div class="ticker-track">
+      <div class="ticker-inner">
+        <span>Keith Sonderling</span>
+        <span>Secretary of Labor</span>
+        <span>Sonderling DOL</span>
+        <span>Labor Secretary Sonderling</span>
+        <span>Keith Sonderling Department of Labor</span>
+        <span>Sonderling Secretary of Labor</span>
+        <span>Keith Sonderling DOL</span>
+        <span>Sonderling Labor Secretary</span>
+        <span>Keith Sonderling Secretary of Labor</span>
+        <span>Sonderling Department of Labor</span>
+        <!-- duplicate for seamless loop -->
+        <span>Keith Sonderling</span>
+        <span>Secretary of Labor</span>
+        <span>Sonderling DOL</span>
+        <span>Labor Secretary Sonderling</span>
+        <span>Keith Sonderling Department of Labor</span>
+        <span>Sonderling Secretary of Labor</span>
+        <span>Keith Sonderling DOL</span>
+        <span>Sonderling Labor Secretary</span>
+        <span>Keith Sonderling Secretary of Labor</span>
+        <span>Sonderling Department of Labor</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- HEADER -->
+  <div class="header">
+    <div>
+      <div class="brand-name">SONDERLING <em>MONITOR</em></div>
+      <div class="brand-sub">connorgu/sonderling-monitor · GitHub Actions · runs every 5 min · 24/7</div>
+    </div>
+    <div class="header-right">
+      <div class="live-chip">
+        <div class="pulse" id="pulse"></div>
+        <span id="sys-status">CONNECTING</span>
+      </div>
+      <div class="timer-label" id="timer-label">—</div>
+      <button class="btn" id="btn-refresh">↺ REFRESH</button>
+    </div>
+  </div>
+
+  <!-- STAT TILES -->
+  <div class="tiles" id="tiles">
+    <div class="tile"><div class="spinner-row"><div class="spin"></div></div></div>
+    <div class="tile"><div class="spinner-row"><div class="spin"></div></div></div>
+    <div class="tile"><div class="spinner-row"><div class="spin"></div></div></div>
+    <div class="tile"><div class="spinner-row"><div class="spin"></div></div></div>
+  </div>
+
+  <!-- MAIN COLUMNS -->
+  <div class="main">
+    <div class="col">
+      <div class="col-head">
+        <span class="col-title">WORKFLOW RUN LOG</span>
+        <span class="col-meta" id="run-meta">—</span>
+      </div>
+      <div class="col-body" id="run-list">
+        <div class="spinner-row"><div class="spin"></div>&nbsp;Fetching runs…</div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="col-head">
+        <span class="col-title">ALERT EVENTS</span>
+        <span class="col-meta" id="alert-meta">—</span>
+      </div>
+      <div class="col-body" id="alert-list">
+        <div class="spinner-row"><div class="spin"></div>&nbsp;Fetching events…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHART -->
+  <div class="chart-wrap">
+    <div class="chart-head">
+      <span class="col-title">ALERT ACTIVITY · HOUR OF DAY (UTC)</span>
+      <div class="chart-legend" id="chart-legend">—</div>
+    </div>
+    <div class="chart-canvas">
+      <canvas id="chart" style="width:100%;height:80px;display:block;"></canvas>
+    </div>
+  </div>
+
+  <!-- SOURCES -->
+  <div class="sources">
+    <div class="src-label" id="src-label">ACTIVE SOURCES</div>
+    <div class="src-chips" id="src-chips"></div>
+  </div>
+</div>
+
+
+<script>
+/* ── CONFIG ── */
+const OWNER = 'connorgu';
+const REPO  = 'sonderling-monitor';
+const API   = '/github-api';  // proxied by dashboard_server.py
+
+const SOURCES = [
+  'Fox News','CNN','NBC','ABC','CBS','Washington Post','NY Times',
+  'Reuters','WSJ','Politico','The Hill','NPR','Axios','Breitbart',
+  'AP News','Dept of Labor','White House','Congress','BLS',
+  'Yahoo News','Yahoo Finance','C-SPAN','Bloomberg Politics',
+  'CNBC','CNBC Economy','Daily Caller','Washington Examiner',
+  'Daily Wire','The Federalist','Newsmax','Washington Times',
+  'Newsweek','DuckDuckGo Web','Bing Web','Reddit','X/Twitter','LinkedIn',
+];
+const TERMS = [
+  '"Keith Sonderling"','"Secretary Sonderling"',
+  '"Sonderling" "secretary of labor"','"Sonderling" "labor secretary"',
+  '"Keith Sonderling" "secretary of labor"','"Keith Sonderling" "labor secretary"',
+  '"Sonderling" "department of labor"','"Keith Sonderling" "department of labor"',
+  '"Keith Sonderling" "DOL"','"Sonderling" "DOL"',
+];
+
+/* ── STATE ── */
+let tickInterval = null;
+
+/* ── UTILS ── */
+const ago = iso => {
+  if (!iso) return '—';
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (s < 60)    return Math.floor(s) + 's ago';
+  if (s < 3600)  return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+};
+
+const utcFmt = iso => {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('en-US', {
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+    hour12: false, timeZone: 'UTC',
+  }) + ' UTC';
+};
+
+const durFmt = (a, b) => {
+  if (!a || !b) return '—';
+  const s = Math.round((new Date(b) - new Date(a)) / 1000);
+  if (s < 60) return s + 's';
+  return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+};
+
+const esc = s => String(s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+/* ── API ── */
+async function gfetch(path) {
+  const r = await fetch(API + path);
+  if (r.status === 401) throw new Error('GitHub token rejected (401) — re-run dashboard_server.py and re-enter your token.');
+  if (r.status === 403) {
+    const t = await r.text();
+    if (t.includes('rate limit')) throw new Error('GitHub rate limit hit — wait a minute then click Refresh.');
+    throw new Error('GitHub 403 — ensure token has "repo" scope.');
+  }
+  if (r.status === 404) throw new Error('Repo not found (404) — check OWNER/REPO in dashboard_server.py.');
+  if (!r.ok) throw new Error('Proxy error: HTTP ' + r.status + '. Is dashboard_server.py running?');
+  return r.json();
+}
+
+/* ── DATA ── */
+async function fetchAll() {
+  const [runsResp, seenResp, commitsResp] = await Promise.all([
+    gfetch('/repos/' + OWNER + '/' + REPO + '/actions/runs?per_page=100'),
+    gfetch('/repos/' + OWNER + '/' + REPO + '/contents/seen_items.json'),
+    gfetch('/repos/' + OWNER + '/' + REPO + '/commits?path=seen_items.json&per_page=30'),
+  ]);
+
+  const runs = runsResp.workflow_runs || [];
+
+  let seenUrls = [];
+  try {
+    const parsed = JSON.parse(atob(seenResp.content.replace(/\s/g, '')));
+    // seen_items.json is now a {url: timestamp} dict — extract keys as URL list
+    seenUrls = Array.isArray(parsed) ? parsed : Object.keys(parsed);
+  } catch (e) { /* empty or malformed */ }
+
+  const alertCommits = commitsResp.filter(c =>
+    (c.commit?.message || '').includes('skip ci')
+    || (c.commit?.message || '').toLowerCase().includes('seen items')
+  );
+
+  return { runs, seenUrls, alertCommits };
+}
+
+/* ── RENDER ── */
+function tile(label, val, detail, valColor) {
+  return `<div class="tile">
+    <div class="tile-label">${label}</div>
+    <div class="tile-val" style="color:${valColor || 'var(--text)'}">${val}</div>
+    <div class="tile-detail">${detail}</div>
+  </div>`;
+}
+
+function renderTiles({ runs, seenUrls, alertCommits }) {
+  const ok   = runs.filter(r => r.conclusion === 'success').length;
+  const rate = runs.length ? Math.round(ok / runs.length * 100) : 0;
+  const rCol = rate >= 90 ? 'var(--ok)' : rate >= 70 ? 'var(--warn)' : 'var(--fail)';
+  const lat  = runs[0];
+  const conc = lat ? (lat.conclusion || lat.status || '?').toUpperCase() : '—';
+  const cCol = conc === 'SUCCESS' ? 'var(--ok)' : conc === 'FAILURE' ? 'var(--fail)' : 'var(--info)';
+
+  document.getElementById('tiles').innerHTML =
+    tile('TOTAL ALERTS SENT',  seenUrls.length.toLocaleString(),
+         'unique URLs logged in seen_items.json', 'var(--accent)') +
+    tile('ALERT BATCHES',      alertCommits.length,
+         'commits that updated seen_items') +
+    tile('LAST CHECK',         lat ? ago(lat.updated_at) : '—',
+         `<span style="color:${cCol}">${conc}</span>`) +
+    tile('SUCCESS RATE',       rate + '%',
+         ok + ' / ' + runs.length + ' runs succeeded', rCol);
+}
+
+function badgeOf(r) {
+  const s = r.conclusion || r.status;
+  if (s === 'success')     return '<span class="badge b-ok">OK</span>';
+  if (s === 'failure')     return '<span class="badge b-fail">FAIL</span>';
+  if (s === 'in_progress') return '<span class="badge b-run">LIVE</span>';
+  return `<span class="badge b-mute">${esc((s||'?').slice(0,5).toUpperCase())}</span>`;
+}
+
+function renderRuns(runs) {
+  document.getElementById('run-meta').textContent = runs.length + ' runs';
+  if (!runs.length) {
+    document.getElementById('run-list').innerHTML =
+      '<div class="spinner-row">No workflow runs found</div>';
+    return;
+  }
+  document.getElementById('run-list').innerHTML = runs.slice(0, 40).map(r => `
+    <div class="run">
+      ${badgeOf(r)}
+      <span class="run-event">#${esc(r.run_number)} · ${esc(r.event === 'schedule' ? 'cron' : r.event || '?')}</span>
+      <span class="run-ago">${ago(r.created_at)}</span>
+      <span class="run-dur">${durFmt(r.created_at, r.updated_at)}</span>
+    </div>`).join('');
+}
+
+function renderAlerts(alertCommits, seenUrls) {
+  document.getElementById('alert-meta').textContent = seenUrls.length + ' total URLs';
+  if (!alertCommits.length) {
+    document.getElementById('alert-list').innerHTML =
+      '<div class="spinner-row">No alert events recorded yet</div>';
+    return;
+  }
+  document.getElementById('alert-list').innerHTML = alertCommits.map(c => {
+    const d   = c.commit?.author?.date || c.commit?.committer?.date || '';
+    const sha = esc((c.sha || '').slice(0, 7));
+    return `<div class="alert">
+      <div class="adot"></div>
+      <div class="alert-inner">
+        <div class="alert-when">${utcFmt(d)}</div>
+        <div class="alert-body">Alert batch fired — seen_items.json updated</div>
+        <div class="alert-sha">commit ${sha}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderChart(alertCommits) {
+  const canvas = document.getElementById('chart');
+  if (!canvas) return;
+
+  const counts = new Array(24).fill(0);
+  for (const c of alertCommits) {
+    const iso = c.commit?.author?.date || c.commit?.committer?.date || '';
+    if (!iso) continue;
+    counts[new Date(iso).getUTCHours()]++;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const W   = canvas.offsetWidth || 800;
+  const H   = 80;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const BAR_H = 55;
+  const maxC  = Math.max(...counts, 1);
+  const step  = (W - 4) / 24;
+  const bw    = Math.floor(step) - 2;
+
+  // grid
+  ctx.strokeStyle = '#0d1628';
+  ctx.lineWidth = 1;
+  [0, 0.5, 1].forEach(t => {
+    const y = Math.floor(BAR_H * (1 - t)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  });
+
+  for (let h = 0; h < 24; h++) {
+    const x  = 2 + h * step;
+    const bh = counts[h] ? Math.max(3, BAR_H * counts[h] / maxC) : 2;
+    const y  = BAR_H - bh;
+    // ET business hours ≈ UTC 13-22  (9am-6pm ET)
+    const biz = h >= 13 && h <= 22;
+    ctx.fillStyle = counts[h]
+      ? (biz ? 'rgba(232,160,32,0.88)' : 'rgba(232,160,32,0.35)')
+      : '#0d1628';
+    ctx.fillRect(x, y, bw, bh);
+
+    if (counts[h] > 0 && bh > 14) {
+      ctx.fillStyle = '#c8d4e8';
+      ctx.font = `bold ${9}px "JetBrains Mono", monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText(counts[h], x + bw / 2, y - 3);
+    }
+    if (h % 6 === 0) {
+      ctx.fillStyle = '#3a4f6a';
+      ctx.font = `${8.5}px "JetBrains Mono", monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText(String(h).padStart(2, '0') + ':00', x + bw / 2, H - 2);
+    }
+  }
+
+  document.getElementById('chart-legend').innerHTML =
+    '<span><span class="ld" style="background:rgba(232,160,32,.88)"></span>ET biz hrs</span>' +
+    '<span><span class="ld" style="background:rgba(232,160,32,.35)"></span>off-hours</span>' +
+    `<span>${alertCommits.length} events sampled</span>`;
+}
+
+function renderSources() {
+  document.getElementById('src-label').textContent =
+    `ACTIVE SOURCES — ${SOURCES.length} outlets · ${TERMS.length} search terms`;
+  document.getElementById('src-chips').innerHTML =
+    SOURCES.map(s => `<span class="chip">${esc(s)}</span>`).join('') +
+    TERMS.map(t  => `<span class="chip term">${esc(t)}</span>`).join('');
+}
+
+/* ── STATUS ── */
+function setStatus(state, text) {
+  const p = document.getElementById('pulse');
+  const s = document.getElementById('sys-status');
+  p.className = 'pulse' + (state === 'ok' ? '' : state === 'fail' ? ' dead' : ' warn');
+  if (s) s.textContent = text;
+}
+
+/* ── COUNTDOWN ── */
+function startCountdown() {
+  let n = 30;
+  clearInterval(tickInterval);
+  tickInterval = setInterval(() => {
+    n--;
+    const el = document.getElementById('timer-label');
+    if (el) {
+      const t = new Date().toLocaleTimeString('en-US', { hour12: false, timeZone: 'UTC' });
+      el.innerHTML = `${t} UTC · refresh in ${n}s`;
+    }
+    if (n <= 0) { clearInterval(tickInterval); load(); }
+  }, 1000);
+}
+
+/* ── LOAD ── */
+async function load() {
+  clearInterval(tickInterval);
+  setStatus('warn', 'LOADING…');
+  try {
+    const data = await fetchAll();
+    renderTiles(data);
+    renderRuns(data.runs);
+    renderAlerts(data.alertCommits, data.seenUrls);
+    setTimeout(() => renderChart(data.alertCommits), 40);
+
+    const lat = data.runs[0];
+    const ok  = !lat || lat.conclusion === 'success' || lat.status === 'in_progress';
+    setStatus(ok ? 'ok' : 'fail', ok ? 'SYSTEM ACTIVE' : 'LAST RUN FAILED');
+    startCountdown();
+  } catch (err) {
+    setStatus('fail', 'API ERROR');
+    document.getElementById('run-list').innerHTML =
+      `<div class="err-box">${esc(err.message)}</div>`;
+    document.getElementById('alert-list').innerHTML =
+      `<div class="err-box">See error above.</div>`;
+    const el = document.getElementById('timer-label');
+    if (el) el.textContent = 'Auto-retry in 60s';
+    tickInterval = setTimeout(() => load(), 60000);
+  }
+}
+
+/* ── BOOT ── */
+document.getElementById('btn-refresh').addEventListener('click', () => {
+  clearInterval(tickInterval);
+  load();
+});
+
+renderSources();
+load();
+</script>
+</body>
+</html>
