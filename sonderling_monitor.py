@@ -5,12 +5,11 @@ Keith Sonderling Media Monitor — 24/7 real-time alert system
 RECENCY GATE: RSS/Twitter/Reddit → 30 min hard gate (real timestamps)
               Web search (LinkedIn/blogs) → 60 min gate (search-engine indexed)
 CONCURRENCY: all 100+ sources fetched in parallel every poll cycle
-SOURCES: Google News (×5 keywords), Bing News (×5), 42 direct outlets,
-         Reddit (×5), Google Alerts RSS (×4+),
-         DuckDuckGo Web (×7 queries), Bing Web (×5 queries)
-         — catches LinkedIn posts, X/Twitter posts, blog mentions
+SOURCES: Google News (×10 keywords), 35 direct outlets, Google Alerts RSS (×4+),
+         DuckDuckGo Web (×12 queries), Bing Web (×10 queries)
+         — catches LinkedIn posts, X/Twitter posts, blog mentions, DOL releases
 KEYWORDS: "Keith Sonderling" · "Sonderling" + context
-LATENCY:  Cron every 5 min → polls every 20 s for 4.5 min → ≤ 50 s worst case
+LATENCY:  Cron every 5 min → polls every 15 s for 4.5 min → ≤ 35 s worst case
 """
 from __future__ import annotations
 import base64, html as _html, json, os, re, smtplib, time, urllib.parse, urllib.request, xml.etree.ElementTree as ET
@@ -47,24 +46,21 @@ DOL_EXTRA_KEYWORDS    = ["secretary of labor", "labor secretary"]
 
 RSS_FEEDS = [
     ("https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en", "Google News"),
-    ("https://www.bing.com/news/search?q={query}&format=RSS", "Bing News"),
+    # Bing News RSS removed — returns malformed XML (non-well-formed token) on every request
 ]
 
 DIRECT_FEEDS = [
+    # ── Major politics / news ─────────────────────────────────────────────────
     ("https://feeds.foxnews.com/foxnews/politics",               "Fox News"),
     ("https://feeds.foxnews.com/foxnews/latest",                 "Fox News (all)"),
     ("https://feeds.foxbusiness.com/foxbusiness/latest",         "Fox Business"),
-    ("https://rss.cnn.com/rss/edition.rss",                      "CNN"),
     ("https://feeds.nbcnews.com/nbcnews/public/politics",        "NBC News"),
     ("https://abcnews.go.com/abcnews/politicsheadlines",         "ABC News"),
     ("https://www.cbsnews.com/latest/rss/politics",              "CBS News"),
     ("https://feeds.washingtonpost.com/rss/politics",            "Washington Post"),
     ("https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml","NY Times"),
     ("https://rss.nytimes.com/services/xml/rss/nyt/Business.xml","NY Times Business"),
-    ("https://feeds.reuters.com/reuters/politicsNews",           "Reuters"),
-    ("https://feeds.reuters.com/reuters/topNews",                "Reuters Top"),
     ("https://feeds.a.dj.com/rss/RSSWorldNews.xml",              "Wall Street Journal"),
-    ("https://www.politico.com/rss/politicopicks.xml",           "Politico"),
     ("https://thehill.com/feed/",                                "The Hill"),
     ("https://www.npr.org/rss/rss.php?id=1014",                  "NPR Politics"),
     ("https://www.axios.com/feeds/feed.rss",                     "Axios"),
@@ -74,15 +70,13 @@ DIRECT_FEEDS = [
     ("https://spectator.org/feed/",                              "The Spectator"),
     ("https://www.realclearpolitics.com/index.xml",              "RealClearPolitics"),
     ("https://nypost.com/feed/",                                 "NY Post"),
-    ("https://apnews.com/rss",                                   "AP News"),
-    ("https://www.dol.gov/rss/releases.xml",                     "Dept of Labor"),
-    ("https://www.whitehouse.gov/feed/",                         "White House"),
-    ("https://www.congress.gov/rss/congressional-record.xml",    "Congress"),
-    ("https://www.bls.gov/feed/bls_latest.rss",                  "BLS"),
     ("https://news.yahoo.com/rss/",                              "Yahoo News"),
     ("https://finance.yahoo.com/news/rssindex",                  "Yahoo Finance"),
-    ("https://news.yahoo.com/rss/politics",                      "Yahoo Politics"),
-    ("https://www.c-span.org/feeds/clips.rss",                   "C-SPAN"),
+    # ── Government (critical for Sonderling/DOL) ──────────────────────────────
+    # White House: old /feed/ returns 404; briefing-room is the active path
+    ("https://www.whitehouse.gov/briefing-room/statements-releases/feed/", "White House"),
+    ("https://www.whitehouse.gov/briefing-room/feed/",           "White House Blog"),
+    # DOL RSS returns 403 from GitHub IPs — covered by Google News search terms instead
     # ── Additional outlets ────────────────────────────────────────────────────
     ("https://feeds.bloomberg.com/politics/news.rss",            "Bloomberg Politics"),
     ("https://www.cnbc.com/id/100003114/device/rss/rss.html",    "CNBC"),
@@ -91,19 +85,30 @@ DIRECT_FEEDS = [
     ("https://www.washingtonexaminer.com/feed",                  "Washington Examiner"),
     ("https://www.dailywire.com/feeds/rss.xml",                  "Daily Wire"),
     ("https://thefederalist.com/feed/",                          "The Federalist"),
-    ("https://www.newsmax.com/rss/Politics/16/",                 "Newsmax"),
-    ("https://www.washingtontimes.com/rss/headlines/news/politics/", "Washington Times"),
     ("https://www.newsweek.com/rss",                             "Newsweek"),
     # ── Labor / HR specialty ─────────────────────────────────────────────────────
     ("https://news.bloomberglaw.com/rss/daily-labor-report",    "Bloomberg Daily Labor"),
     ("https://www.hrdive.com/feeds/news/",                      "HR Dive"),
     ("https://ogletree.com/feed/",                              "Ogletree Deakins"),
+    # Removed (confirmed dead/blocked from GitHub Actions IPs):
+    # Reuters feeds.reuters.com — DNS failure (Name or service not known)
+    # CNN rss.cnn.com — SSL EOF error
+    # Politico /rss/politicopicks.xml — 403 Forbidden
+    # AP News apnews.com/rss — 403 Forbidden
+    # DOL dol.gov/rss/releases.xml — 403 Forbidden (covered via Google News)
+    # BLS bls.gov/feed/bls_latest.rss — 403 Forbidden
+    # Congress congress.gov/rss — 404 Not Found
+    # Yahoo Politics /rss/politics — 404 Not Found
+    # Washington Times — 403 Forbidden
+    # C-SPAN /feeds/clips.rss — 404 Not Found
+    # Newsmax /rss/Politics/16/ — read timeout
 ]
 
 _GA_RAW = os.environ.get("GOOGLE_ALERTS_RSS", "").strip()
 GOOGLE_ALERTS_FEEDS: list[str] = [u.strip() for u in _GA_RAW.split(",") if u.strip()]
 
-REDDIT_URL    = "https://www.reddit.com/search.json?q={query}&sort=new&limit=25"
+# Reddit JSON API returns 403 from GitHub Actions IPs on every request — removed
+# Reddit mentions are still caught via DuckDuckGo/Bing web search (site:reddit.com indexed)
 DDG_WEB_URL   = "https://html.duckduckgo.com/html/?q={query}&kl=us-en&df=d"
 BING_WEB_URL  = "https://www.bing.com/search?q={query}&setlang=en&cc=US&first=1&freshness=Day"
 
@@ -141,7 +146,11 @@ def _is_recent(pub_str: str, label: str = "", title: str = "") -> bool:
         print(f"    [drop-nodate] {label}: {title[:60]}")
         return False
     try:
-        pub_dt = parsedate_to_datetime(pub_str)
+        # RFC 2822 first (standard RSS), then ISO 8601 (Atom / some feeds)
+        try:
+            pub_dt = parsedate_to_datetime(pub_str)
+        except Exception:
+            pub_dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
         if pub_dt.tzinfo is None:
             pub_dt = pub_dt.replace(tzinfo=timezone.utc)
         age = datetime.now(timezone.utc) - pub_dt
@@ -175,7 +184,7 @@ def load_seen() -> dict[str, str]:
 
 
 def save_seen(seen: dict[str, str]) -> None:
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
     pruned = {url: ts for url, ts in seen.items() if ts >= cutoff}
     if len(pruned) > 5000:
         pruned = dict(sorted(pruned.items(), key=lambda x: x[1])[-5000:])
@@ -578,7 +587,6 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
         enc = urllib.parse.quote(term)
         for tmpl, label in RSS_FEEDS:
             tasks.append(("rss", tmpl.format(query=enc), label, True))
-        tasks.append(("reddit", REDDIT_URL.format(query=enc), "Reddit", None))
 
     for url, label in DIRECT_FEEDS:
         tasks.append(("rss", url, label, True))
