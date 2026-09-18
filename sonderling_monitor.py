@@ -2,14 +2,14 @@
 """
 Keith Sonderling Media Monitor — 24/7 real-time alert system
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RECENCY GATE: RSS/Twitter/Reddit → 30 min hard gate (real timestamps)
-              Web search (LinkedIn/blogs) → 60 min gate (search-engine indexed)
-CONCURRENCY: all 100+ sources fetched in parallel every poll cycle
-SOURCES: Google News (×10 keywords), 35 direct outlets, Google Alerts RSS (×4+),
-         DuckDuckGo Web (×12 queries), Bing Web (×10 queries)
+RECENCY GATE: RSS/Twitter → 30 min hard gate (real timestamps)
+              Bing Web search → 60 min gate (search-engine indexing lag)
+CONCURRENCY: all sources fetched in parallel every poll cycle
+SOURCES: Google News RSS (×10 keywords), Bing News RSS (×10 keywords),
+         31 direct outlets, Google Alerts RSS (×4+), Bing Web (×12 queries)
          — catches LinkedIn posts, X/Twitter posts, blog mentions, DOL releases
 KEYWORDS: "Keith Sonderling" · "Sonderling" + context
-LATENCY:  Cron every 5 min → polls every 15 s for 4.5 min → ≤ 35 s worst case
+LATENCY:  Cron every 5 min → polls every 15 s for 4.5 min → ≤ 20 s worst case
 """
 from __future__ import annotations
 import base64, html as _html, json, os, re, smtplib, time, urllib.parse, urllib.request, xml.etree.ElementTree as ET
@@ -46,7 +46,7 @@ DOL_EXTRA_KEYWORDS    = ["secretary of labor", "labor secretary"]
 
 RSS_FEEDS = [
     ("https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en", "Google News"),
-    # Bing News RSS removed — returns malformed XML (non-well-formed token) on every request
+    ("https://www.bing.com/news/search?q={query}&format=rss",                   "Bing News"),
 ]
 
 DIRECT_FEEDS = [
@@ -106,8 +106,7 @@ _GA_RAW = os.environ.get("GOOGLE_ALERTS_RSS", "").strip()
 GOOGLE_ALERTS_FEEDS: list[str] = [u.strip() for u in _GA_RAW.split(",") if u.strip()]
 
 # Reddit JSON API returns 403 from GitHub Actions IPs on every request — removed
-# Reddit mentions are still caught via DuckDuckGo/Bing web search (site:reddit.com indexed)
-DDG_WEB_URL   = "https://html.duckduckgo.com/html/?q={query}&kl=us-en&df=d"
+# DuckDuckGo HTML returns 403/connection-drop from GitHub Actions IPs — removed
 BING_WEB_URL  = "https://www.bing.com/search?q={query}&setlang=en&cc=US&first=1&freshness=Day"
 
 # Extra queries aimed at social platforms — LinkedIn posts + X/Twitter indexed by search engines
@@ -370,6 +369,20 @@ def _canonical(url: str) -> str:
         return url
 
 
+def _decode_bing_ck_url(url: str) -> str:
+    """Bing wraps every web result in /ck/a?...u=a1BASE64URL. Decode to the real URL."""
+    try:
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        encoded = (params.get("u") or [""])[0]
+        if encoded.startswith("a1"):
+            decoded = base64.urlsafe_b64decode(encoded[2:] + "==").decode("utf-8", errors="replace")
+            if decoded.startswith("http") and "bing.com" not in decoded:
+                return decoded
+    except Exception:
+        pass
+    return url
+
+
 # ── Per-feed fetch workers (called concurrently) ──────────────────────────────
 
 def _fetch_rss(url: str, label: str, keyword_filter: bool) -> list[dict]:
@@ -434,18 +447,15 @@ def _fetch_reddit(url: str) -> list[dict]:
 
 def _fetch_web_search(query: str, label: str) -> list[dict]:
     """
-    Scrape DuckDuckGo HTML lite or Bing Web search results.
+    Scrape Bing Web search results for recent Sonderling mentions.
 
     DATE POLICY — three-tier, strict:
       1. Twitter/X: snowflake ID decoded to exact minute — drop if > MAX_AGE_MINUTES.
-      2. Other URLs: parse date from DDG result__timestamp / Bing news_dt element,
-         then from the full snippet text.  Drop if > MAX_AGE_MINUTES.
+      2. Other URLs: parse date from Bing news_dt element or snippet text.
+         Drop if > WEB_MAX_AGE_MINUTES.
       3. No date recoverable at all: DROP.  Never assume "now" for unknown-age content.
     """
-    if "DuckDuckGo" in label:
-        url = DDG_WEB_URL.format(query=urllib.parse.quote(query))
-    else:
-        url = BING_WEB_URL.format(query=urllib.parse.quote(query))
+    url = BING_WEB_URL.format(query=urllib.parse.quote(query))
 
     raw = _get(url)
     if not raw:
@@ -458,108 +468,53 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
         return _html.unescape(re.sub(r"<[^>]+>", "", html_frag)).strip()
 
     try:
-        if "DuckDuckGo" in label:
-            # DDG HTML lite structure:
-            #   <a class="result__a" href="/l/?uddg=<url>">Title</a>
-            #   optionally: <span class="result__timestamp">4 minutes ago</span>
-            #   <div class="result__snippet">snippet text</div>
-            pairs = re.findall(
-                r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>'
-                r'(.*?)'                                      # block between title and snippet
-                r'class="result__snippet"[^>]*>(.*?)</div>',
-                text, re.DOTALL,
-            )
-            for href, title_raw, middle, snip_raw in pairs[:10]:
-                title = _clean(title_raw)
-                snip  = _clean(snip_raw)
-                # DDG wraps real URL in uddg= param
-                m = re.search(r"[?&]uddg=([^&]+)", href)
-                real = urllib.parse.unquote(m.group(1)) if m else href
-                if not real.startswith("http"):
+        # Bing web structure:
+        #   <h2><a href="https://www.bing.com/ck/a?...u=a1BASE64URL...">Title</a></h2>
+        #   <div class="b_caption"><p><span class="news_dt">4 min ago</span> snippet</p></div>
+        # All hrefs are bing.com/ck/a? redirects — must decode to get the real URL.
+        pairs = re.findall(
+            r'<h2[^>]*>\s*<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>\s*</h2>'
+            r'.*?<div[^>]+class="b_caption"[^>]*>.*?<p[^>]*>(.*?)</p>',
+            text, re.DOTALL,
+        )
+        for href_raw, title_raw, snip_raw in pairs[:15]:
+            href = _decode_bing_ck_url(href_raw) if "bing.com/ck/a" in href_raw else href_raw
+            if not href.startswith("http") or "bing.com" in href:
+                continue
+            title    = _clean(title_raw)
+            snip_raw_clean = snip_raw
+            snip     = _clean(snip_raw)
+            if not any(kw in (title + " " + snip).lower() for kw in KEYWORDS):
+                continue
+
+            # ── DATE VERIFICATION ─────────────────────────────────────────
+            tweet_age = _tweet_age_minutes(href)
+            if tweet_age is not None:
+                if tweet_age > MAX_AGE_MINUTES:
+                    print(f"    [drop-old-tweet {tweet_age:.0f}m] {title[:60]}")
                     continue
-                if not any(kw in (title + " " + snip).lower() for kw in KEYWORDS):
+                pub = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+            else:
+                dt_span = re.search(r'class="news_dt"[^>]*>(.*?)</span>', snip_raw_clean, re.DOTALL)
+                dt_text = _clean(dt_span.group(1)) if dt_span else ""
+                pub = _parse_snippet_date(dt_text) or _parse_snippet_date(snip)
+                if not pub:
+                    print(f"    [drop-nodate-web] {label}: {title[:60]}")
                     continue
-
-                # ── DATE VERIFICATION (strictest path first) ──────────────────
-                # 1. Twitter/X: decode snowflake ID
-                tweet_age = _tweet_age_minutes(real)
-                if tweet_age is not None:
-                    if tweet_age > MAX_AGE_MINUTES:
-                        print(f"    [drop-old-tweet {tweet_age:.0f}m] {title[:60]}")
+                from email.utils import parsedate_to_datetime as _p2dt
+                try:
+                    _age = (datetime.now(timezone.utc) - _p2dt(pub)).total_seconds() / 60
+                    if _age > WEB_MAX_AGE_MINUTES:
+                        print(f"    [drop-old-web {_age:.0f}m] {label}: {title[:60]}")
                         continue
-                    pub = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+                except Exception:
+                    pass
 
-                else:
-                    # 2. Try DDG's result__timestamp span, then full snippet text
-                    ts_span = re.search(r'class="result__timestamp"[^>]*>(.*?)</span>', middle, re.DOTALL)
-                    ts_text = _clean(ts_span.group(1)) if ts_span else ""
-                    pub = _parse_snippet_date(ts_text) or _parse_snippet_date(snip)
-                    if not pub:
-                        # 3. No verifiable date — drop rather than risk old content
-                        print(f"    [drop-nodate-web] {label}: {title[:60]}")
-                        continue
-                    # Use the looser web gate (60 min) — allows for indexing lag
-                    from email.utils import parsedate_to_datetime as _p2dt
-                    try:
-                        _age = (datetime.now(timezone.utc) - _p2dt(pub)).total_seconds() / 60
-                        if _age > WEB_MAX_AGE_MINUTES:
-                            print(f"    [drop-old-web {_age:.0f}m] {label}: {title[:60]}")
-                            continue
-                    except Exception:
-                        pass
-
-                items.append({
-                    "title": title, "link": _canonical(real),
-                    "published": pub, "source": label, "snippet": snip,
-                })
-
-        else:  # Bing Web
-            # Bing web structure:
-            #   <h2><a href="https://...">Title</a></h2>
-            #   <div class="b_caption"><p><span class="news_dt">4 min ago</span> snippet</p></div>
-            pairs = re.findall(
-                r'<h2[^>]*>\s*<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>\s*</h2>'
-                r'.*?<div[^>]+class="b_caption"[^>]*>.*?<p[^>]*>(.*?)</p>',
-                text, re.DOTALL,
-            )
-            for href, title_raw, snip_raw in pairs[:10]:
-                if "bing.com" in href:
-                    continue
-                title    = _clean(title_raw)
-                snip_raw_clean = snip_raw  # keep HTML for news_dt extraction
-                snip     = _clean(snip_raw)
-                if not any(kw in (title + " " + snip).lower() for kw in KEYWORDS):
-                    continue
-
-                # ── DATE VERIFICATION ─────────────────────────────────────────
-                tweet_age = _tweet_age_minutes(href)
-                if tweet_age is not None:
-                    if tweet_age > MAX_AGE_MINUTES:
-                        print(f"    [drop-old-tweet {tweet_age:.0f}m] {title[:60]}")
-                        continue
-                    pub = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
-
-                else:
-                    # Try Bing's news_dt span first, then full snippet text
-                    dt_span = re.search(r'class="news_dt"[^>]*>(.*?)</span>', snip_raw_clean, re.DOTALL)
-                    dt_text = _clean(dt_span.group(1)) if dt_span else ""
-                    pub = _parse_snippet_date(dt_text) or _parse_snippet_date(snip)
-                    if not pub:
-                        print(f"    [drop-nodate-web] {label}: {title[:60]}")
-                        continue
-                    from email.utils import parsedate_to_datetime as _p2dt
-                    try:
-                        _age = (datetime.now(timezone.utc) - _p2dt(pub)).total_seconds() / 60
-                        if _age > WEB_MAX_AGE_MINUTES:
-                            print(f"    [drop-old-web {_age:.0f}m] {label}: {title[:60]}")
-                            continue
-                    except Exception:
-                        pass
-
-                items.append({
-                    "title": title, "link": _canonical(href),
-                    "published": pub, "source": label, "snippet": snip,
-                })
+            items.append({
+                "title": title, "link": _canonical(href),
+                "published": pub, "source": label, "snippet": snip,
+            })
 
     except Exception as exc:
         print(f"  [warn] web-search parse ({label}): {exc}")
@@ -592,13 +547,11 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
     for ga_url in GOOGLE_ALERTS_FEEDS:
         tasks.append(("rss", ga_url, "Google Alerts", False))
 
-    # Web search: DuckDuckGo + Bing — surfaces LinkedIn, X/Twitter, blogs
+    # Web search: Bing — surfaces LinkedIn, X/Twitter, blogs (DDG blocked on GH Actions)
     for term in SEARCH_TERMS:
-        tasks.append(("web", term, "DuckDuckGo Web", None))
-        tasks.append(("web", term, "Bing Web",       None))
+        tasks.append(("web", term, "Bing Web", None))
     for term in SOCIAL_SEARCH_TERMS:
-        tasks.append(("web", term, "DuckDuckGo Web", None))
-        tasks.append(("web", term, "Bing Web",       None))
+        tasks.append(("web", term, "Bing Web", None))
 
     print(f"  [fetch] launching {len(tasks)} concurrent requests …")
 
@@ -687,7 +640,7 @@ def _subject_tag(item: dict) -> str:
     if "twitter.com" in l or "x.com" in l: return "[X/TWITTER]"
     if "reddit.com"  in l or "reddit" in s: return "[REDDIT]"
     if "google alerts"              in s: return "[GOOGLE ALERT]"
-    if "duckduckgo"  in s or "bing web" in s: return "[WEB]"
+    if "bing web" in s: return "[WEB]"
     if "whitehouse.gov"             in l: return "[WHITE HOUSE]"
     if "dol.gov"                    in l: return "[DEPT OF LABOR]"
     if "congress.gov"               in l: return "[CONGRESS]"
@@ -739,16 +692,15 @@ def main() -> None:
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=MAX_AGE_MINUTES)).strftime("%H:%M UTC")
 
     tier1    = len(RSS_FEEDS) * len(SEARCH_TERMS)
-    web_ddg  = len(SEARCH_TERMS) + len(SOCIAL_SEARCH_TERMS)
     web_bing = len(SEARCH_TERMS) + len(SOCIAL_SEARCH_TERMS)
-    total    = tier1 + len(DIRECT_FEEDS) + len(GOOGLE_ALERTS_FEEDS) + web_ddg + web_bing
+    total    = tier1 + len(DIRECT_FEEDS) + len(GOOGLE_ALERTS_FEEDS) + web_bing
 
     print(f"[start] {start}")
     print(f"[start] {len(seen)} previously seen items")
     print(f"[start] Recency gate: >{MAX_AGE_MINUTES} min old = dropped  (cutoff: {cutoff})")
     print(f"[start] {tier1} news feeds + {len(DIRECT_FEEDS)} outlets "
           f"+ {len(GOOGLE_ALERTS_FEEDS)} Google Alerts "
-          f"+ {web_ddg} DuckDuckGo Web + {web_bing} Bing Web = {total} sources (all concurrent)")
+          f"+ {web_bing} Bing Web = {total} sources (all concurrent)")
     if not GOOGLE_ALERTS_FEEDS:
         print("[start] WARNING: GOOGLE_ALERTS_RSS not set — add GitHub secret for full-web coverage")
     mode_str = "∞ (Railway persistent)" if LOOP_DURATION == 0 else f"{LOOP_DURATION}s"
