@@ -73,9 +73,7 @@ DIRECT_FEEDS = [
     ("https://news.yahoo.com/rss/",                              "Yahoo News"),
     ("https://finance.yahoo.com/news/rssindex",                  "Yahoo Finance"),
     # ── Government (critical for Sonderling/DOL) ──────────────────────────────
-    # White House: old /feed/ returns 404; briefing-room is the active path
-    ("https://www.whitehouse.gov/briefing-room/statements-releases/feed/", "White House"),
-    ("https://www.whitehouse.gov/briefing-room/feed/",           "White House Blog"),
+    # White House RSS: all /feed/ paths return 404 from GitHub Actions; covered via Google News
     # DOL RSS returns 403 from GitHub IPs — covered by Google News search terms instead
     # ── Additional outlets ────────────────────────────────────────────────────
     ("https://feeds.bloomberg.com/politics/news.rss",            "Bloomberg Politics"),
@@ -85,7 +83,7 @@ DIRECT_FEEDS = [
     ("https://www.washingtonexaminer.com/feed",                  "Washington Examiner"),
     ("https://www.dailywire.com/feeds/rss.xml",                  "Daily Wire"),
     ("https://thefederalist.com/feed/",                          "The Federalist"),
-    ("https://www.newsweek.com/rss",                             "Newsweek"),
+    # Newsweek /rss → 404 from GitHub Actions — covered by Google News search terms
     # ── Labor / HR specialty ─────────────────────────────────────────────────────
     ("https://news.bloomberglaw.com/rss/daily-labor-report",    "Bloomberg Daily Labor"),
     ("https://www.hrdive.com/feeds/news/",                      "HR Dive"),
@@ -740,16 +738,15 @@ def main() -> None:
     start  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=MAX_AGE_MINUTES)).strftime("%H:%M UTC")
 
-    tier1   = len(RSS_FEEDS) * len(SEARCH_TERMS)
-    reddit  = len(SEARCH_TERMS)
-    web_ddg = len(SEARCH_TERMS) + len(SOCIAL_SEARCH_TERMS)
-    web_bing = len(SEARCH_TERMS)
-    total   = tier1 + reddit + len(DIRECT_FEEDS) + len(GOOGLE_ALERTS_FEEDS) + web_ddg + web_bing
+    tier1    = len(RSS_FEEDS) * len(SEARCH_TERMS)
+    web_ddg  = len(SEARCH_TERMS) + len(SOCIAL_SEARCH_TERMS)
+    web_bing = len(SEARCH_TERMS) + len(SOCIAL_SEARCH_TERMS)
+    total    = tier1 + len(DIRECT_FEEDS) + len(GOOGLE_ALERTS_FEEDS) + web_ddg + web_bing
 
     print(f"[start] {start}")
     print(f"[start] {len(seen)} previously seen items")
     print(f"[start] Recency gate: >{MAX_AGE_MINUTES} min old = dropped  (cutoff: {cutoff})")
-    print(f"[start] {tier1} news feeds + {reddit} Reddit + {len(DIRECT_FEEDS)} outlets "
+    print(f"[start] {tier1} news feeds + {len(DIRECT_FEEDS)} outlets "
           f"+ {len(GOOGLE_ALERTS_FEEDS)} Google Alerts "
           f"+ {web_ddg} DuckDuckGo Web + {web_bing} Bing Web = {total} sources (all concurrent)")
     if not GOOGLE_ALERTS_FEEDS:
