@@ -5,8 +5,8 @@ Keith Sonderling Media Monitor — 24/7 real-time alert system
 RECENCY GATE: RSS/Twitter → 30 min hard gate (real timestamps)
               Bing Web search → 60 min gate (search-engine indexing lag)
 CONCURRENCY: all sources fetched in parallel every poll cycle
-SOURCES: Google News RSS (×10 keywords), Bing News RSS (×10 keywords),
-         31 direct outlets, Google Alerts RSS (×4+), Bing Web (×12 queries)
+SOURCES: Google News RSS (×10 keywords), 31 direct outlets,
+         Google Alerts RSS (×4+), Bing Web (×12 queries)
          — catches LinkedIn posts, X/Twitter posts, blog mentions, DOL releases
 KEYWORDS: "Keith Sonderling" · "Sonderling" + context
 LATENCY:  Cron every 5 min → polls every 15 s for 4.5 min → ≤ 20 s worst case
@@ -46,7 +46,7 @@ DOL_EXTRA_KEYWORDS    = ["secretary of labor", "labor secretary"]
 
 RSS_FEEDS = [
     ("https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en", "Google News"),
-    ("https://www.bing.com/news/search?q={query}&format=rss",                   "Bing News"),
+    # Bing News RSS returns HTML bot-detection from GitHub Actions IPs (invalid XML) — removed
 ]
 
 DIRECT_FEEDS = [
