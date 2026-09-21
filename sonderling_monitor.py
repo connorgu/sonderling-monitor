@@ -34,6 +34,7 @@ SEARCH_TERMS = [
     '"Keith Sonderling" "department of labor"',    # full name + department name
     '"Keith Sonderling" "DOL"',                    # full name + acronym
     '"Sonderling" "DOL"',                          # surname + acronym
+    '"Sonderling47"',                              # his X/Twitter handle — news coverage
 ]
 
 # Matched against title+description for direct outlet feeds (Tier 3).
@@ -41,7 +42,7 @@ SEARCH_TERMS = [
 KEYWORDS = ["sonderling"]
 
 # DOL.gov and White House may announce the Secretary by title without spelling the surname.
-DOL_HIGH_VALUE_LABELS = {"Dept of Labor", "White House"}
+DOL_HIGH_VALUE_LABELS = {"Dept of Labor", "White House", "DOL YouTube", "White House YouTube"}
 DOL_EXTRA_KEYWORDS    = ["secretary of labor", "labor secretary"]
 
 RSS_FEEDS = [
@@ -72,9 +73,12 @@ DIRECT_FEEDS = [
     ("https://nypost.com/feed/",                                 "NY Post"),
     ("https://news.yahoo.com/rss/",                              "Yahoo News"),
     ("https://finance.yahoo.com/news/rssindex",                  "Yahoo Finance"),
-    # ── Government (critical for Sonderling/DOL) ──────────────────────────────
+    # ── Government / YouTube (Atom feeds — handled by updated _fetch_rss) ───────
     # White House RSS: all /feed/ paths return 404 from GitHub Actions; covered via Google News
     # DOL RSS returns 403 from GitHub IPs — covered by Google News search terms instead
+    # YouTube Atom feeds work fine from GitHub Actions IPs:
+    ("https://www.youtube.com/feeds/videos.xml?user=USDepartmentofLabor", "DOL YouTube"),
+    ("https://www.youtube.com/feeds/videos.xml?user=whitehouse",           "White House YouTube"),
     # ── Additional outlets ────────────────────────────────────────────────────
     ("https://feeds.bloomberg.com/politics/news.rss",            "Bloomberg Politics"),
     ("https://www.cnbc.com/id/100003114/device/rss/rss.html",    "CNBC"),
@@ -109,10 +113,13 @@ GOOGLE_ALERTS_FEEDS: list[str] = [u.strip() for u in _GA_RAW.split(",") if u.str
 # DuckDuckGo HTML returns 403/connection-drop from GitHub Actions IPs — removed
 BING_WEB_URL  = "https://www.bing.com/search?q={query}&setlang=en&cc=US&first=1&freshness=Day"
 
-# Extra queries aimed at social platforms — LinkedIn posts + X/Twitter indexed by search engines
+# Extra queries aimed at social platforms — indexed by Bing within ~60 min
 SOCIAL_SEARCH_TERMS = [
-    '"Keith Sonderling" site:linkedin.com',
-    '"Keith Sonderling" site:twitter.com OR site:x.com',
+    '"Keith Sonderling" site:linkedin.com',      # LinkedIn posts/articles
+    '"Keith Sonderling" site:twitter.com',       # Twitter (older indexed posts)
+    '"Keith Sonderling" site:x.com',             # X.com posts
+    '"Sonderling47" site:x.com',                 # his @handle — catches replies/tags
+    '"Keith Sonderling" site:youtube.com',       # YouTube videos mentioning him
 ]
 
 HEADERS = {
@@ -385,7 +392,12 @@ def _decode_bing_ck_url(url: str) -> str:
 
 # ── Per-feed fetch workers (called concurrently) ──────────────────────────────
 
+_ATOM  = "{http://www.w3.org/2005/Atom}"    # YouTube / gov Atom feeds
+_MEDIA = "{http://search.yahoo.com/mrss/}"  # YouTube media namespace
+
+
 def _fetch_rss(url: str, label: str, keyword_filter: bool) -> list[dict]:
+    """Parse RSS 2.0 and Atom feeds (YouTube uses Atom with media: extensions)."""
     raw = _get(url)
     if not raw:
         return []
@@ -394,24 +406,62 @@ def _fetch_rss(url: str, label: str, keyword_filter: bool) -> list[dict]:
     except ET.ParseError as exc:
         print(f"  [warn] parse error ({label}): {exc}")
         return []
-    items = []
-    for item in root.findall(".//item"):
-        link = (item.findtext("link") or "").strip()
+
+    def _kw_ok(title: str, desc: str) -> bool:
+        txt = (title + " " + desc).lower()
+        if any(kw in txt for kw in KEYWORDS):
+            return True
+        if label in DOL_HIGH_VALUE_LABELS:
+            return any(kw in txt for kw in DOL_EXTRA_KEYWORDS)
+        return False
+
+    items: list[dict] = []
+
+    # ── RSS 2.0 path ──────────────────────────────────────────────────────────
+    rss_entries = root.findall(".//item")
+    if rss_entries:
+        for el in rss_entries:
+            link  = (el.findtext("link") or "").strip()
+            if not link:
+                continue
+            title = (el.findtext("title") or "").strip()
+            desc  = (el.findtext("description") or "").strip()
+            if keyword_filter and not _kw_ok(title, desc):
+                continue
+            items.append({
+                "title":     title,
+                "link":      _canonical(link),
+                "published": (el.findtext("pubDate") or "").strip(),
+                "source":    label,
+            })
+        return items
+
+    # ── Atom path (YouTube, some gov feeds) ──────────────────────────────────
+    atom_entries = root.findall(f".//{_ATOM}entry") or root.findall(".//entry")
+    for el in atom_entries:
+        title = (el.findtext(f"{_ATOM}title") or el.findtext("title") or "").strip()
+        # Atom link is an attribute, not text
+        link_el = el.find(f"{_ATOM}link") or el.find("link")
+        link = (link_el.get("href") if link_el is not None else "") or ""
+        # YouTube fallback: decode yt:video:ID from <id>
+        if not link:
+            id_val = (el.findtext(f"{_ATOM}id") or el.findtext("id") or "").strip()
+            if "yt:video:" in id_val:
+                link = "https://www.youtube.com/watch?v=" + id_val.split("yt:video:")[-1]
         if not link:
             continue
-        title = (item.findtext("title") or "").strip()
-        desc  = (item.findtext("description") or "").strip()
-        if keyword_filter:
-            text_lower = (title + " " + desc).lower()
-            passes = any(kw in text_lower for kw in KEYWORDS)
-            if not passes and label in DOL_HIGH_VALUE_LABELS:
-                passes = any(kw in text_lower for kw in DOL_EXTRA_KEYWORDS)
-            if not passes:
-                continue
+        pub = (el.findtext(f"{_ATOM}published") or el.findtext("published") or
+               el.findtext(f"{_ATOM}updated")   or el.findtext("updated") or "").strip()
+        # YouTube description is inside <media:group><media:description>
+        grp  = el.find(f"{_MEDIA}group")
+        desc = (grp.findtext(f"{_MEDIA}description") if grp is not None else None) or \
+               el.findtext(f"{_ATOM}summary") or el.findtext("summary") or ""
+        if keyword_filter and not _kw_ok(title, desc):
+            continue
         items.append({
             "title":     title,
             "link":      _canonical(link),
-            "published": (item.findtext("pubDate") or "").strip(),
+            "published": pub,
             "source":    label,
         })
     return items
