@@ -9,7 +9,7 @@ SOURCES: Google News RSS (×10 keywords), 31 direct outlets,
          Google Alerts RSS (×4+), Bing Web (×12 queries)
          — catches LinkedIn posts, X/Twitter posts, blog mentions, DOL releases
 KEYWORDS: "Keith Sonderling" · "Sonderling" + context
-LATENCY:  Cron every 5 min → polls every 15 s for 4.5 min → ≤ 20 s worst case
+LATENCY:  Cron every 5 min → polls continuously for 4.5 min → ≤ 10 s worst case
 """
 from __future__ import annotations
 import base64, html as _html, json, os, re, smtplib, time, urllib.parse, urllib.request, xml.etree.ElementTree as ET
@@ -20,8 +20,8 @@ from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-MAX_AGE_MINUTES     = 30   # RSS, Reddit, Twitter/X — real timestamps, tight gate
-WEB_MAX_AGE_MINUTES = 60   # Web search (LinkedIn, blogs) — search engine indexing lag
+MAX_AGE_MINUTES     = 60   # RSS/Atom feeds — widened from 30 to survive GH Actions outages
+WEB_MAX_AGE_MINUTES = 120  # Bing Web — widened from 60; freshness=Day already caps to 24h
 
 SEARCH_TERMS = [
     '"Keith Sonderling"',                          # full name — most precise
@@ -92,6 +92,9 @@ DIRECT_FEEDS = [
     ("https://news.bloomberglaw.com/rss/daily-labor-report",    "Bloomberg Daily Labor"),
     ("https://www.hrdive.com/feeds/news/",                      "HR Dive"),
     ("https://ogletree.com/feed/",                              "Ogletree Deakins"),
+    # ── Additional working outlets (confirmed from local tests) ──────────────────
+    ("https://rollcall.com/feed/",                              "Roll Call"),
+    ("https://rss.politico.com/politics-news.xml",              "Politico"),
     # Removed (confirmed dead/blocked from GitHub Actions IPs):
     # Reuters feeds.reuters.com — DNS failure (Name or service not known)
     # CNN rss.cnn.com — SSL EOF error
@@ -271,11 +274,13 @@ def _parse_snippet_date(text: str) -> str | None:
         except Exception:
             pass
 
-    # ISO date-only: 2026-09-15 (day precision; age computed from midnight UTC)
+    # ISO date-only: 2026-09-15. If it's today, use now (avoids midnight-UTC false-drops).
     m = re.search(r'(\d{4})-(\d{2})-(\d{2})(?!\d)', text)
     if m:
         try:
-            dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc)
+            article_date = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=timezone.utc)
+            today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            dt = now if article_date >= today else article_date
             return dt.strftime("%a, %d %b %Y %H:%M:%S +0000")
         except Exception:
             pass
@@ -364,9 +369,10 @@ def _canonical(url: str) -> str:
         parsed = urllib.parse.urlparse(url)
         qs = {k: v for k, v in urllib.parse.parse_qs(parsed.query).items()
               if k.lower() not in STRIP_PARAMS}
+        netloc = parsed.netloc.lower().removeprefix("www.")
         return urllib.parse.urlunparse((
             parsed.scheme.lower(),
-            parsed.netloc.lower().lstrip("www."),
+            netloc,
             parsed.path.rstrip("/"),
             parsed.params,
             urllib.parse.urlencode(qs, doseq=True),
@@ -467,30 +473,47 @@ def _fetch_rss(url: str, label: str, keyword_filter: bool) -> list[dict]:
     return items
 
 
-def _fetch_reddit(url: str) -> list[dict]:
+
+def _fetch_federal_register() -> list[dict]:
+    """
+    Free Federal Register API — no auth required.
+    Catches every DOL rule, executive order, and notice mentioning Sonderling.
+    publication_date is date-only; treat same-day results as current.
+    """
+    url = (
+        "https://www.federalregister.gov/api/v1/articles.json"
+        "?conditions%5Bterm%5D=Sonderling&order=newest&per_page=20"
+        "&fields%5B%5D=title&fields%5B%5D=html_url&fields%5B%5D=publication_date"
+        "&fields%5B%5D=abstract&fields%5B%5D=type"
+    )
     raw = _get(url)
     if not raw:
         return []
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except Exception:
         return []
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     items = []
-    for child in data.get("data", {}).get("children", []):
-        d    = child.get("data", {})
-        link = d.get("url", "").strip()
+    for doc in data.get("results", []):
+        link = (doc.get("html_url") or "").strip()
         if not link:
             continue
-        ts  = d.get("created_utc", 0)
-        pub = (
-            datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
-            if ts else ""
-        )
+        title = (doc.get("title") or "").strip()
+        pub_date = (doc.get("publication_date") or "").strip()
+        abstract = (doc.get("abstract") or "").strip()
+        if not pub_date:
+            continue
+        # Only alert on today's Federal Register (it publishes once per business day)
+        if pub_date != today_str:
+            continue
+        pub_str = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
         items.append({
-            "title":     d.get("title", "").strip(),
+            "title":     title or f"Federal Register: {doc.get('type', 'Document')}",
             "link":      _canonical(link),
-            "published": pub,
-            "source":    "Reddit",
+            "published": pub_str,
+            "source":    "Federal Register",
+            "snippet":   abstract[:200] if abstract else "",
         })
     return items
 
@@ -602,6 +625,8 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
         tasks.append(("web", term, "Bing Web", None))
     for term in SOCIAL_SEARCH_TERMS:
         tasks.append(("web", term, "Bing Web", None))
+    # Federal Register API — free, no auth, covers DOL rules/notices/executive orders
+    tasks.append(("fedreg", None, "Federal Register", None))
 
     print(f"  [fetch] launching {len(tasks)} concurrent requests …")
 
@@ -611,8 +636,8 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
         for kind, url, label, kw_filter in tasks:
             if kind == "rss":
                 futures.append(pool.submit(_fetch_rss, url, label, kw_filter))
-            elif kind == "reddit":
-                futures.append(pool.submit(_fetch_reddit, url))
+            elif kind == "fedreg":
+                futures.append(pool.submit(_fetch_federal_register))
             else:  # web
                 futures.append(pool.submit(_fetch_web_search, url, label))
         for fut in as_completed(futures):
@@ -682,6 +707,35 @@ def _build_body(item: dict) -> str:
     return "\n".join(lines)
 
 
+def _build_html_body(item: dict) -> str:
+    now_str = datetime.now(timezone.utc).strftime("%B %d, %Y at %I:%M %p UTC")
+    kind = _classify(item)
+    snippet = _html.escape(item.get("snippet", "").strip()[:300])
+    title_esc = _html.escape(item["title"])
+    source_esc = _html.escape(item["source"])
+    pub_esc = _html.escape(item["published"] or now_str)
+    link = item["link"]
+    snip_row = f'<tr><td style="color:#6b7280;padding:4px 0"><b>Preview</b></td><td style="padding:4px 0 4px 12px">{snippet}</td></tr>' if snippet else ""
+    return f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+  <div style="background:#1e3a5f;color:#fff;padding:16px 20px;border-radius:6px 6px 0 0">
+    <span style="font-size:11px;letter-spacing:1px;opacity:.75">SONDERLING MONITOR</span>
+    <h2 style="margin:4px 0 0;font-size:16px">{title_esc}</h2>
+  </div>
+  <div style="background:#f9fafb;padding:16px 20px;border:1px solid #e5e7eb;border-top:none">
+    <table style="width:100%;border-collapse:collapse;font-size:14px">
+      <tr><td style="color:#6b7280;padding:4px 0;white-space:nowrap"><b>Type</b></td><td style="padding:4px 0 4px 12px">{kind}</td></tr>
+      <tr><td style="color:#6b7280;padding:4px 0"><b>Source</b></td><td style="padding:4px 0 4px 12px">{source_esc}</td></tr>
+      <tr><td style="color:#6b7280;padding:4px 0"><b>Posted</b></td><td style="padding:4px 0 4px 12px">{pub_esc}</td></tr>
+      <tr><td style="color:#6b7280;padding:4px 0"><b>Link</b></td><td style="padding:4px 0 4px 12px"><a href="{link}" style="color:#1e3a5f">{link[:80]}{"..." if len(link)>80 else ""}</a></td></tr>
+      {snip_row}
+    </table>
+  </div>
+  <div style="padding:10px 20px;background:#fff;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 6px 6px;font-size:11px;color:#9ca3af">
+    Alert generated {now_str}
+  </div>
+</div>"""
+
+
 def _subject_tag(item: dict) -> str:
     """Short prefix so the email source is visible before opening."""
     l = item.get("link", "").lower()
@@ -710,6 +764,7 @@ def send_alert(items: list[dict]) -> None:
             msg["From"]    = f"Sonderling Monitor <{gmail_user}>"
             msg["To"]      = ", ".join(recipients)
             msg.attach(MIMEText(_build_body(item), "plain"))
+            msg.attach(MIMEText(_build_html_body(item), "html"))
             srv.sendmail(gmail_user, recipients, msg.as_string())
             print(f"  [alert] → {recipients}  [{item['source']}] {item['title'][:60]}")
 
@@ -719,11 +774,12 @@ def send_alert(items: list[dict]) -> None:
 def poll_once(seen: dict[str, str]) -> tuple[dict[str, str], int]:
     new_items = fetch_all(seen)
     if new_items:
-        send_alert(new_items)
+        # Mark seen BEFORE sending — prevents double-alert if SMTP fails mid-batch
         now_iso = datetime.now(timezone.utc).isoformat()
         for it in new_items:
             seen[it["link"]] = now_iso
         save_seen(seen)
+        send_alert(new_items)
         if LOOP_DURATION == 0:
             _push_seen_to_github(seen)
     return seen, len(new_items)
@@ -743,14 +799,14 @@ def main() -> None:
 
     tier1    = len(RSS_FEEDS) * len(SEARCH_TERMS)
     web_bing = len(SEARCH_TERMS) + len(SOCIAL_SEARCH_TERMS)
-    total    = tier1 + len(DIRECT_FEEDS) + len(GOOGLE_ALERTS_FEEDS) + web_bing
+    total    = tier1 + len(DIRECT_FEEDS) + len(GOOGLE_ALERTS_FEEDS) + web_bing + 1  # +1 Fed Register
 
     print(f"[start] {start}")
     print(f"[start] {len(seen)} previously seen items")
     print(f"[start] Recency gate: >{MAX_AGE_MINUTES} min old = dropped  (cutoff: {cutoff})")
     print(f"[start] {tier1} news feeds + {len(DIRECT_FEEDS)} outlets "
           f"+ {len(GOOGLE_ALERTS_FEEDS)} Google Alerts "
-          f"+ {web_bing} Bing Web = {total} sources (all concurrent)")
+          f"+ {web_bing} Bing Web + 1 Federal Register = {total} sources (all concurrent)")
     if not GOOGLE_ALERTS_FEEDS:
         print("[start] WARNING: GOOGLE_ALERTS_RSS not set — add GitHub secret for full-web coverage")
     mode_str = "∞ (Railway persistent)" if LOOP_DURATION == 0 else f"{LOOP_DURATION}s"
