@@ -37,7 +37,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_EMAIL:        ${{ secrets.ALERT_EMAIL }}
           GOOGLE_ALERTS_RSS:  ${{ secrets.GOOGLE_ALERTS_RSS }}
-          POLL_INTERVAL:      "10"
+          POLL_INTERVAL:      "0"
           LOOP_DURATION:      "270"
         run: python sonderling_monitor.py
 
