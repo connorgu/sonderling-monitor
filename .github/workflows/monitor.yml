@@ -33,12 +33,13 @@ jobs:
 
       - name: Run monitor
         env:
-          GMAIL_USER:         ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          ALERT_EMAIL:        ${{ secrets.ALERT_EMAIL }}
-          GOOGLE_ALERTS_RSS:  ${{ secrets.GOOGLE_ALERTS_RSS }}
-          POLL_INTERVAL:      "0"
-          LOOP_DURATION:      "270"
+          GMAIL_USER:            ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:    ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL:           ${{ secrets.ALERT_EMAIL }}
+          GOOGLE_ALERTS_RSS:     ${{ secrets.GOOGLE_ALERTS_RSS }}
+          TWITTER_BEARER_TOKEN:  ${{ secrets.TWITTER_BEARER_TOKEN }}
+          POLL_INTERVAL:         "0"
+          LOOP_DURATION:         "270"
         run: python sonderling_monitor.py
 
       - name: Trigger next run

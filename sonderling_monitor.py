@@ -2,13 +2,14 @@
 """
 Keith Sonderling Media Monitor — 24/7 real-time alert system
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RECENCY GATE: RSS/Twitter → 30 min hard gate (real timestamps)
-              Bing Web search → 60 min gate (search-engine indexing lag)
-CONCURRENCY: all sources fetched in parallel every poll cycle
-SOURCES: Google News RSS (×10 keywords), 31 direct outlets,
-         Google Alerts RSS (×4+), Bing Web (×12 queries)
-         — catches LinkedIn posts, X/Twitter posts, blog mentions, DOL releases
-KEYWORDS: "Keith Sonderling" · "Sonderling" + context
+SOURCES: Google News RSS (×21 terms × 4 templates), 35 direct outlets,
+         Bing Web p1+p2 (×21+8 terms), Bing News (×21+8 terms),
+         Nitter/Twitter RSS (8 user timelines + 7 searches),
+         Twitter API v2 (optional — set TWITTER_BEARER_TOKEN secret),
+         Federal Register API
+TWITTER: Nitter instances catch tweets within MINUTES of posting.
+         Set TWITTER_BEARER_TOKEN for sub-second detection via API v2.
+KEYWORDS: "Keith Sonderling" · "Sonderling" + context · Senate/cloture/confirmation
 LATENCY:  Cron every 5 min → polls continuously for 4.5 min → ≤ 10 s worst case
 """
 from __future__ import annotations
@@ -38,6 +39,14 @@ SEARCH_TERMS = [
     '"Sonderling47"',                              # his X/Twitter handle — news coverage
     '"acting labor secretary" "Sonderling"',       # catches titles like KCTV5's subtitle
     '"acting secretary of labor" "Sonderling"',    # alternate formal phrasing
+    # Senate confirmation tracking — catches breaking vote/cloture tweets fast
+    '"Sonderling" "cloture"',                      # CraigCaplan-style cloture tweets
+    '"Sonderling" "senate"',                       # any Senate floor activity
+    '"Sonderling" "confirmation"',                 # confirmation vote news
+    '"Sonderling" "nomination"',                   # nomination status updates
+    '"Sonderling" "confirmed"',                    # confirmed as Secretary
+    '"Sonderling" "vote"',                         # floor vote coverage
+    '"Sonderling" "hearing"',                      # committee hearing references
 ]
 
 # Matched against title+description for direct outlet feeds (Tier 3).
@@ -132,8 +141,52 @@ SOCIAL_SEARCH_TERMS = [
     '"Keith Sonderling" site:twitter.com',       # Twitter (older indexed posts)
     '"Keith Sonderling" site:x.com',             # X.com posts
     '"Sonderling47" site:x.com',                 # his @handle — catches replies/tags
+    '"Sonderling" site:x.com',                   # surname alone on X — catches body mentions
+    '"Sonderling47"',                             # handle as standalone Bing search (not site:)
     '"Keith Sonderling" site:youtube.com',       # YouTube videos mentioning him
+    # Senate reporters who break floor/cloture news — site: searches pick up fast
+    '"Sonderling" site:c-span.org',              # C-SPAN coverage
 ]
+
+# Nitter — open-source Twitter frontend with RSS support; real-time, no API key.
+# Tries each instance in order; falls back to next on failure.
+# These catch tweets MINUTES after posting — 30-60x faster than Bing indexing.
+NITTER_INSTANCES = [
+    "nitter.privacydev.net",
+    "nitter.net",
+    "nitter.1d4.us",
+    "nitter.poast.org",
+    "nitter.catsarch.com",
+]
+
+# High-value Twitter accounts to monitor directly via Nitter user-timeline RSS.
+# These are the journalists and officials who break Sonderling news first.
+NITTER_ACCOUNTS = [
+    ("Sonderling47",    False),  # Sonderling himself — all his posts are relevant
+    ("CraigCaplan",     True),   # C-SPAN Capitol Hill reporter — broke cloture tweet
+    ("sahilkapur",      True),   # NBC News Congress reporter
+    ("frankthorp",      True),   # NBC News Capitol Hill
+    ("DOL",             True),   # Dept of Labor official account
+    ("WhiteHouseGov",   True),   # White House announcements
+    ("SenateGOP",       True),   # Senate Republican caucus
+    ("POTUS",           True),   # Presidential announcements
+]
+
+# Twitter search queries via Nitter — real-time Twitter search, no auth needed
+NITTER_SEARCH_TERMS = [
+    '"Keith Sonderling"',
+    '"Secretary Sonderling"',
+    '"Sonderling" labor',
+    '"Sonderling" cloture',
+    '"Sonderling" confirmation',
+    '"Sonderling" senate',
+    'Sonderling47',
+]
+
+# Optional: Twitter API v2 Essential (free tier) — 15 req/15min, real-time.
+# Set TWITTER_BEARER_TOKEN as a GitHub Actions secret for instant tweet detection.
+TWITTER_BEARER = os.environ.get("TWITTER_BEARER_TOKEN", "")
+_last_twitter_v2: float = 0.0
 
 HEADERS = {
     "User-Agent": (
@@ -348,14 +401,15 @@ def _tweet_age_minutes(url: str) -> float | None:
 
 # ── Network ───────────────────────────────────────────────────────────────────
 
-def _get(url: str) -> bytes | None:
-    for attempt in range(2):
+def _get(url: str, timeout: int = 15, retry: bool = True) -> bytes | None:
+    attempts = 2 if retry else 1
+    for attempt in range(attempts):
         try:
             req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read()
         except Exception as exc:
-            if attempt == 1:
+            if attempt == attempts - 1:
                 print(f"  [warn] {url[:80]}  →  {exc}")
             else:
                 time.sleep(3)
@@ -674,6 +728,123 @@ def _fetch_bing_news(query: str, label: str) -> list[dict]:
     return items
 
 
+def _fetch_nitter(path: str, label: str, keyword_filter: bool) -> list[dict]:
+    """
+    Real-time Twitter via Nitter RSS — no API key, no rate limit.
+    Tries each instance in NITTER_INSTANCES until one returns valid XML.
+    `path` is either "{username}/rss" or "search/rss?q={query}&f=tweets".
+    Returns results minutes after posting — not 30-60 min Bing-indexing lag.
+    """
+    for inst in NITTER_INSTANCES:
+        url = f"https://{inst}/{path}"
+        raw = _get(url, timeout=5, retry=False)
+        if not raw:
+            continue
+        head = raw[:500]
+        if b"<rss" not in head and b"<?xml" not in head and b"<feed" not in head:
+            continue
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            continue
+
+        items: list[dict] = []
+        for el in root.findall(".//item"):
+            link  = (el.findtext("link") or "").strip()
+            if not link:
+                continue
+            title = (el.findtext("title") or "").strip()
+            desc  = (el.findtext("description") or "").strip()
+            if keyword_filter:
+                txt = (title + " " + re.sub(r"<[^>]+>", "", desc)).lower()
+                if not any(kw in txt for kw in KEYWORDS) and \
+                   "secretary of labor" not in txt and "labor secretary" not in txt:
+                    continue
+            pub = (el.findtext("pubDate") or "").strip()
+            # Nitter sometimes puts x.com links; normalize to x.com canonical
+            link = link.replace(f"{inst}/", "x.com/").replace("https://nitter.", "https://x.")
+            items.append({
+                "title":     title,
+                "link":      _canonical(link),
+                "published": pub,
+                "source":    label,
+                "snippet":   re.sub(r"<[^>]+>", "", _html.unescape(desc))[:200],
+            })
+        return items
+
+    return []
+
+
+def _fetch_twitter_v2() -> list[dict]:
+    """
+    Twitter API v2 recent search — free Essential tier, up to 100 tweets/call.
+    Enforces a 60-second minimum between calls to respect 15 req/15 min rate limit.
+    Set TWITTER_BEARER_TOKEN as a GitHub Actions secret to enable this.
+    Catches tweets within seconds of posting — best possible Twitter latency.
+    """
+    global _last_twitter_v2
+    if not TWITTER_BEARER:
+        return []
+    now = time.monotonic()
+    if now - _last_twitter_v2 < 60:
+        return []
+    _last_twitter_v2 = now
+
+    # Combined OR query: one API call covers all key variations
+    query = (
+        '("Keith Sonderling" OR "Secretary Sonderling" OR '
+        '"Sonderling47" OR "Sonderling labor" OR "Sonderling cloture" OR '
+        '"Sonderling senate" OR "Sonderling confirmation") lang:en -is:retweet'
+    )
+    url = (
+        "https://api.twitter.com/2/tweets/search/recent"
+        "?query=" + urllib.parse.quote(query) +
+        "&max_results=100"
+        "&tweet.fields=created_at,text,author_id"
+        "&expansions=author_id"
+        "&user.fields=username"
+        "&sort_order=recency"
+    )
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {TWITTER_BEARER}",
+        "User-Agent":    "SonderlingMonitor/1.0",
+        "Accept":        "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+    except Exception as exc:
+        print(f"  [warn] Twitter API v2: {exc}")
+        return []
+
+    users = {u["id"]: u["username"] for u in data.get("includes", {}).get("users", [])}
+    items: list[dict] = []
+    for tw in (data.get("data") or []):
+        username = users.get(tw.get("author_id", ""), "unknown")
+        link = f"https://x.com/{username}/status/{tw['id']}"
+
+        age = _tweet_age_minutes(link)
+        if age is not None and age > MAX_AGE_MINUTES:
+            continue
+
+        raw_dt = tw.get("created_at", "")
+        try:
+            pub = datetime.fromisoformat(raw_dt.replace("Z", "+00:00")).strftime(
+                "%a, %d %b %Y %H:%M:%S +0000")
+        except Exception:
+            pub = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+
+        text_body = tw.get("text", "")
+        items.append({
+            "title":     f"@{username}: {text_body[:120]}",
+            "link":      _canonical(link),
+            "published": pub,
+            "source":    "Twitter API",
+            "snippet":   text_body[:300],
+        })
+    return items
+
+
 # ── Concurrent fetch ──────────────────────────────────────────────────────────
 
 def fetch_all(seen: dict[str, str]) -> list[dict]:
@@ -716,6 +887,16 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
         tasks.append(("bnews", term, "Bing News", None))
     # Federal Register API — free, no auth, covers DOL rules/notices/executive orders
     tasks.append(("fedreg", None, "Federal Register", None))
+    # ── Nitter/Twitter real-time RSS ──────────────────────────────────────────
+    # User timelines — catches tweets from journalists/officials within minutes
+    for username, kw_filter in NITTER_ACCOUNTS:
+        tasks.append(("nitter", f"{username}/rss", f"Twitter/@{username}", kw_filter))
+    # Twitter search via Nitter — real-time keyword search, no indexing lag
+    for q in NITTER_SEARCH_TERMS:
+        enc = urllib.parse.quote(q)
+        tasks.append(("nitter", f"search/rss?q={enc}&f=tweets", "Twitter Search", False))
+    # Twitter API v2 (optional — set TWITTER_BEARER_TOKEN GitHub secret for fastest alerts)
+    tasks.append(("twitter_v2", None, "Twitter API v2", None))
 
     print(f"  [fetch] launching {len(tasks)} concurrent requests …")
 
@@ -729,6 +910,10 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
                 futures.append(pool.submit(_fetch_federal_register))
             elif kind == "bnews":
                 futures.append(pool.submit(_fetch_bing_news, url, label))
+            elif kind == "nitter":
+                futures.append(pool.submit(_fetch_nitter, url, label, aux if aux is not None else True))
+            elif kind == "twitter_v2":
+                futures.append(pool.submit(_fetch_twitter_v2))
             else:  # web — aux is the `first` page offset (1 or 11)
                 futures.append(pool.submit(_fetch_web_search, url, label, aux or 1))
         for fut in as_completed(futures):
