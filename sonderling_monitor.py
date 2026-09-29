@@ -20,11 +20,12 @@ from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-MAX_AGE_MINUTES     = 60   # RSS/Atom feeds — widened from 30 to survive GH Actions outages
-WEB_MAX_AGE_MINUTES = 120  # Bing Web — widened from 60; freshness=Day already caps to 24h
+MAX_AGE_MINUTES     = 240  # RSS/Atom feeds — 4 hours to catch slow-indexed local/regional news
+WEB_MAX_AGE_MINUTES = 480  # Bing Web — 8 hours; freshness=Day caps to 24h, this is the real floor
 
 SEARCH_TERMS = [
-    '"Keith Sonderling"',                          # full name — most precise
+    '"Sonderling"',                                # surname alone — catches ALL mentions incl. body-only
+    '"Keith Sonderling"',                          # full name — primary precise hit
     '"Secretary Sonderling"',                      # how press refers to cabinet members
     '"Sonderling" "secretary of labor"',           # surname + formal title
     '"Sonderling" "labor secretary"',              # surname + common shorthand
@@ -35,6 +36,8 @@ SEARCH_TERMS = [
     '"Keith Sonderling" "DOL"',                    # full name + acronym
     '"Sonderling" "DOL"',                          # surname + acronym
     '"Sonderling47"',                              # his X/Twitter handle — news coverage
+    '"acting labor secretary" "Sonderling"',       # catches titles like KCTV5's subtitle
+    '"acting secretary of labor" "Sonderling"',    # alternate formal phrasing
 ]
 
 # Matched against title+description for direct outlet feeds (Tier 3).
@@ -550,14 +553,16 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
             r'.*?<div[^>]+class="b_caption"[^>]*>.*?<p[^>]*>(.*?)</p>',
             text, re.DOTALL,
         )
-        for href_raw, title_raw, snip_raw in pairs[:15]:
+        for href_raw, title_raw, snip_raw in pairs[:30]:
             href = _decode_bing_ck_url(href_raw) if "bing.com/ck/a" in href_raw else href_raw
             if not href.startswith("http") or "bing.com" in href:
                 continue
             title    = _clean(title_raw)
             snip_raw_clean = snip_raw
             snip     = _clean(snip_raw)
-            if not any(kw in (title + " " + snip).lower() for kw in KEYWORDS):
+            combined = (title + " " + snip).lower()
+            if not any(kw in combined for kw in KEYWORDS) and \
+               "secretary of labor" not in combined and "labor secretary" not in combined:
                 continue
 
             # ── DATE VERIFICATION ─────────────────────────────────────────
@@ -612,7 +617,10 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
     for term in SEARCH_TERMS:
         enc = urllib.parse.quote(term)
         for tmpl, label in RSS_FEEDS:
-            tasks.append(("rss", tmpl.format(query=enc), label, True))
+            # keyword_filter=False: the search query already targets Sonderling,
+            # so re-checking the snippet would drop articles where his name is
+            # only in the body (e.g. "High fuel costs" article, KCTV5 Sept 28).
+            tasks.append(("rss", tmpl.format(query=enc), label, False))
 
     for url, label in DIRECT_FEEDS:
         tasks.append(("rss", url, label, True))
