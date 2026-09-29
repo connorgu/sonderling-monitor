@@ -49,7 +49,13 @@ DOL_HIGH_VALUE_LABELS = {"Dept of Labor", "White House", "DOL YouTube", "White H
 DOL_EXTRA_KEYWORDS    = ["secretary of labor", "labor secretary"]
 
 RSS_FEEDS = [
-    ("https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en", "Google News"),
+    # Google News — three time windows: all-time (default), last 6 h, last 2 days.
+    # The 6h window surfaces breaking hits first; 2d is the safety net for slow-indexed outlets.
+    ("https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en",          "Google News"),
+    ("https://news.google.com/rss/search?q={query}+when:6h&hl=en-US&gl=US&ceid=US:en",  "Google News 6h"),
+    ("https://news.google.com/rss/search?q={query}+when:2d&hl=en-US&gl=US&ceid=US:en",  "Google News 2d"),
+    # Yahoo News search RSS — entirely separate crawl/index, worth a parallel sweep.
+    ("https://news.yahoo.com/rss/search?p={query}", "Yahoo News Search"),
     # Bing News RSS returns HTML bot-detection from GitHub Actions IPs (invalid XML) — removed
 ]
 
@@ -117,7 +123,8 @@ GOOGLE_ALERTS_FEEDS: list[str] = [u.strip() for u in _GA_RAW.split(",") if u.str
 
 # Reddit JSON API returns 403 from GitHub Actions IPs on every request — removed
 # DuckDuckGo HTML returns 403/connection-drop from GitHub Actions IPs — removed
-BING_WEB_URL  = "https://www.bing.com/search?q={query}&setlang=en&cc=US&first=1&freshness=Day"
+BING_WEB_URL  = "https://www.bing.com/search?q={query}&setlang=en&cc=US&first={first}&freshness=Day"
+BING_NEWS_URL = "https://www.bing.com/news/search?q={query}&setlang=en&cc=US&sortby=Date"
 
 # Extra queries aimed at social platforms — indexed by Bing within ~60 min
 SOCIAL_SEARCH_TERMS = [
@@ -139,7 +146,7 @@ HEADERS = {
 SEEN_FILE     = Path("seen_items.json")
 LOOP_DURATION = int(os.environ.get("LOOP_DURATION", "270"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "20"))
-MAX_WORKERS   = int(os.environ.get("MAX_WORKERS",   "50"))
+MAX_WORKERS   = int(os.environ.get("MAX_WORKERS",   "100"))
 
 STRIP_PARAMS = {
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
@@ -521,9 +528,10 @@ def _fetch_federal_register() -> list[dict]:
     return items
 
 
-def _fetch_web_search(query: str, label: str) -> list[dict]:
+def _fetch_web_search(query: str, label: str, first: int = 1) -> list[dict]:
     """
     Scrape Bing Web search results for recent Sonderling mentions.
+    `first` controls pagination: 1=page1, 11=page2, 21=page3 (Bing shows ~10 results/page).
 
     DATE POLICY — three-tier, strict:
       1. Twitter/X: snowflake ID decoded to exact minute — drop if > MAX_AGE_MINUTES.
@@ -531,7 +539,7 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
          Drop if > WEB_MAX_AGE_MINUTES.
       3. No date recoverable at all: DROP.  Never assume "now" for unknown-age content.
     """
-    url = BING_WEB_URL.format(query=urllib.parse.quote(query))
+    url = BING_WEB_URL.format(query=urllib.parse.quote(query), first=first)
 
     raw = _get(url)
     if not raw:
@@ -600,6 +608,72 @@ def _fetch_web_search(query: str, label: str) -> list[dict]:
     return items
 
 
+def _fetch_bing_news(query: str, label: str) -> list[dict]:
+    """
+    Scrape Bing News tab (news.bing.com, date-sorted) — separate crawler from Bing Web.
+    Bing News indexes breaking news faster and surfaces local/regional outlets that
+    Bing Web sometimes buries on page 3+.
+    Same date-verification logic as _fetch_web_search.
+    """
+    raw = _get(BING_NEWS_URL.format(query=urllib.parse.quote(query)))
+    if not raw:
+        return []
+    text = raw.decode("utf-8", errors="replace")
+    items: list[dict] = []
+
+    def _clean(s: str) -> str:
+        return _html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
+
+    try:
+        # Bing News card structure:
+        #   <a class="title" href="URL">Title</a>
+        #   followed within ~800 chars by snippet text and a timestamp like "2 hours ago"
+        hits = re.findall(
+            r'<a\s[^>]*\bclass="[^"]*\btitle\b[^"]*"[^>]*\bhref="([^"]+)"[^>]*>(.*?)</a>'
+            r'(.{0,900}?)(?=<a\s[^>]*\bclass="[^"]*\btitle\b|</body>|$)',
+            text, re.DOTALL,
+        )
+        for href_raw, title_raw, context in hits[:40]:
+            href = _decode_bing_ck_url(href_raw) if "bing.com/ck/a" in href_raw else href_raw
+            if not href.startswith("http") or "bing.com" in href or "microsoft.com" in href:
+                continue
+            title = _clean(title_raw)
+            if not title or len(title) < 6:
+                continue
+            ctx = _clean(context)
+            combined = (title + " " + ctx).lower()
+            if not any(kw in combined for kw in KEYWORDS) and \
+               "secretary of labor" not in combined and "labor secretary" not in combined:
+                continue
+
+            tweet_age = _tweet_age_minutes(href)
+            if tweet_age is not None:
+                if tweet_age > MAX_AGE_MINUTES:
+                    print(f"    [drop-old-tweet {tweet_age:.0f}m] {title[:60]}")
+                    continue
+                pub = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+            else:
+                pub = _parse_snippet_date(ctx) or _parse_snippet_date(title)
+                if not pub:
+                    print(f"    [drop-nodate-bnews] {label}: {title[:60]}")
+                    continue
+                try:
+                    age_m = (datetime.now(timezone.utc) - parsedate_to_datetime(pub)).total_seconds() / 60
+                    if age_m > WEB_MAX_AGE_MINUTES:
+                        print(f"    [drop-old-bnews {age_m:.0f}m] {label}: {title[:60]}")
+                        continue
+                except Exception:
+                    pass
+
+            items.append({
+                "title": title, "link": _canonical(href),
+                "published": pub, "source": label, "snippet": ctx[:200],
+            })
+    except Exception as exc:
+        print(f"  [warn] bing-news ({label}): {exc}")
+    return items
+
+
 # ── Concurrent fetch ──────────────────────────────────────────────────────────
 
 def fetch_all(seen: dict[str, str]) -> list[dict]:
@@ -610,8 +684,8 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
       3. recency gate
     Returns only items that pass all three.
     """
-    # Build task list
-    # Each task: ("rss"|"reddit", url, label, keyword_filter_bool)
+    # Build task list — ("rss"|"web"|"bnews"|"fedreg", url_or_query, label, aux)
+    # aux: keyword_filter bool for rss; page-start int for web; None otherwise
     tasks: list[tuple] = []
 
     for term in SEARCH_TERMS:
@@ -628,11 +702,18 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
     for ga_url in GOOGLE_ALERTS_FEEDS:
         tasks.append(("rss", ga_url, "Google Alerts", False))
 
-    # Web search: Bing — surfaces LinkedIn, X/Twitter, blogs (DDG blocked on GH Actions)
+    # Bing Web page 1 + page 2 — 10 results/page; page 2 catches hits buried by fresher content
     for term in SEARCH_TERMS:
-        tasks.append(("web", term, "Bing Web", None))
+        tasks.append(("web",  term, "Bing Web",    1))   # results 1-10
+        tasks.append(("web",  term, "Bing Web p2", 11))  # results 11-20
     for term in SOCIAL_SEARCH_TERMS:
-        tasks.append(("web", term, "Bing Web", None))
+        tasks.append(("web",  term, "Bing Web",    1))
+        tasks.append(("web",  term, "Bing Web p2", 11))
+    # Bing News tab — separate crawler/index, date-sorted, surfaces local TV news faster
+    for term in SEARCH_TERMS:
+        tasks.append(("bnews", term, "Bing News", None))
+    for term in SOCIAL_SEARCH_TERMS:
+        tasks.append(("bnews", term, "Bing News", None))
     # Federal Register API — free, no auth, covers DOL rules/notices/executive orders
     tasks.append(("fedreg", None, "Federal Register", None))
 
@@ -641,13 +722,15 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
     raw_items: list[dict] = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = []
-        for kind, url, label, kw_filter in tasks:
+        for kind, url, label, aux in tasks:
             if kind == "rss":
-                futures.append(pool.submit(_fetch_rss, url, label, kw_filter))
+                futures.append(pool.submit(_fetch_rss, url, label, aux))
             elif kind == "fedreg":
                 futures.append(pool.submit(_fetch_federal_register))
-            else:  # web
-                futures.append(pool.submit(_fetch_web_search, url, label))
+            elif kind == "bnews":
+                futures.append(pool.submit(_fetch_bing_news, url, label))
+            else:  # web — aux is the `first` page offset (1 or 11)
+                futures.append(pool.submit(_fetch_web_search, url, label, aux or 1))
         for fut in as_completed(futures):
             try:
                 raw_items.extend(fut.result())
@@ -805,16 +888,20 @@ def main() -> None:
     start  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=MAX_AGE_MINUTES)).strftime("%H:%M UTC")
 
-    tier1    = len(RSS_FEEDS) * len(SEARCH_TERMS)
-    web_bing = len(SEARCH_TERMS) + len(SOCIAL_SEARCH_TERMS)
-    total    = tier1 + len(DIRECT_FEEDS) + len(GOOGLE_ALERTS_FEEDS) + web_bing + 1  # +1 Fed Register
+    n_terms  = len(SEARCH_TERMS)
+    n_social = len(SOCIAL_SEARCH_TERMS)
+    rss_tasks  = len(RSS_FEEDS) * n_terms
+    web_tasks  = (n_terms + n_social) * 2   # page1 + page2
+    news_tasks = (n_terms + n_social)        # Bing News tab
+    total    = rss_tasks + len(DIRECT_FEEDS) + len(GOOGLE_ALERTS_FEEDS) + web_tasks + news_tasks + 1
 
     print(f"[start] {start}")
     print(f"[start] {len(seen)} previously seen items")
-    print(f"[start] Recency gate: >{MAX_AGE_MINUTES} min old = dropped  (cutoff: {cutoff})")
-    print(f"[start] {tier1} news feeds + {len(DIRECT_FEEDS)} outlets "
+    print(f"[start] Recency gate: RSS >{MAX_AGE_MINUTES} min  |  Web >{WEB_MAX_AGE_MINUTES} min")
+    print(f"[start] {rss_tasks} Google/Yahoo News feeds + {len(DIRECT_FEEDS)} direct outlets "
           f"+ {len(GOOGLE_ALERTS_FEEDS)} Google Alerts "
-          f"+ {web_bing} Bing Web + 1 Federal Register = {total} sources (all concurrent)")
+          f"+ {web_tasks} Bing Web (p1+p2) + {news_tasks} Bing News + 1 Fed Reg "
+          f"= {total} parallel tasks")
     if not GOOGLE_ALERTS_FEEDS:
         print("[start] WARNING: GOOGLE_ALERTS_RSS not set — add GitHub secret for full-web coverage")
     mode_str = "∞ (Railway persistent)" if LOOP_DURATION == 0 else f"{LOOP_DURATION}s"
