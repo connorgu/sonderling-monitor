@@ -504,6 +504,8 @@ def _fetch_rss(url: str, label: str, keyword_filter: bool) -> list[dict]:
                 "link":      _canonical(link),
                 "published": (el.findtext("pubDate") or "").strip(),
                 "source":    label,
+                # Store cleaned description so _verify_keith_sonderling() can use it
+                "snippet":   re.sub(r"<[^>]+>", "", _html.unescape(desc))[:300],
             })
         return items
 
@@ -534,6 +536,7 @@ def _fetch_rss(url: str, label: str, keyword_filter: bool) -> list[dict]:
             "link":      _canonical(link),
             "published": pub,
             "source":    label,
+            "snippet":   re.sub(r"<[^>]+>", "", _html.unescape(desc))[:300],
         })
     return items
 
@@ -854,34 +857,48 @@ def _fetch_twitter_v2() -> list[dict]:
 # random namesake.  "keith" alone is sufficient; otherwise a labor/DOL/Senate
 # context word is required.
 
-_KEITH_CONTEXT = frozenset({
-    "keith",
+# Words that ALONE confirm the article is about Secretary Sonderling —
+# no other Sonderling would appear in this context.
+_SONDERLING_STRONG = frozenset({
     "secretary of labor", "labor secretary", "secretary sonderling",
     "department of labor", "labor department",
-    "dol", "eeoc",
-    "sonderling47",
-    "acting secretary",
-    "secretary",          # broad but acceptable — "Secretary Sonderling" type refs
-    "labor",              # any labor-policy article mentioning Sonderling
-    "nominee", "nomination", "nominate",
-    "confirmation", "confirmed", "confirm",
-    "cloture", "senate vote", "senate floor",
-    "hearing",
-    "cabinet",
-    "trump", "white house",
-    "workforce",
+    "dol", "eeoc", "sonderling47",
+    "acting secretary", "acting labor",
+})
+
+# Words that confirm a government/policy context — need "sonderling" OR "keith"
+# PLUS at least one of these to distinguish the Secretary from a local namesake.
+_SONDERLING_CONTEXT = frozenset({
+    "secretary", "labor", "nominee", "nomination", "nominate",
+    "confirmation", "confirmed", "cloture", "senate", "senate vote",
+    "cabinet", "trump", "white house", "workforce", "hearing",
+    "department", "administration", "policy", "regulation", "wage",
+    "dol", "eeoc", "federal", "oversight", "committee",
 })
 
 
 def _verify_keith_sonderling(item: dict) -> bool:
     """
-    Return True only if title+snippet gives evidence this is about
-    Keith Sonderling (Secretary of Labor), not another person named Sonderling.
-    Logs every drop so we can monitor for over-filtering.
+    Confirm the alert is about Keith Sonderling (Secretary of Labor), not a
+    different person with the same surname (e.g. local Miami-Dade news subjects).
+
+    Logic (two-signal requirement):
+      1. Any STRONG phrase alone → pass (only the Secretary uses these)
+      2. "sonderling" + any CONTEXT word → pass
+      3. "keith" + any CONTEXT word → pass (requires context; "keith" alone
+         is not enough because the Miami-Dade student is also named Keith Sonderling)
+      4. None of the above → drop and log.
     """
     text = (item.get("title", "") + " " + item.get("snippet", "")).lower()
-    if any(kw in text for kw in _KEITH_CONTEXT):
+
+    if any(kw in text for kw in _SONDERLING_STRONG):
         return True
+    has_context = any(kw in text for kw in _SONDERLING_CONTEXT)
+    if "sonderling" in text and has_context:
+        return True
+    if "keith" in text and has_context:
+        return True
+
     print(f"    [drop-wrong-sonderling] {item.get('source','?')}: {item.get('title','')[:70]}")
     return False
 
