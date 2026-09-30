@@ -17,6 +17,7 @@ import base64, html as _html, json, os, re, smtplib, time, urllib.parse, urllib.
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
+from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -996,6 +997,34 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
 
 # ── Email ─────────────────────────────────────────────────────────────────────
 
+_ET = ZoneInfo("America/New_York")
+
+
+def _now_et() -> str:
+    """Current time in US Eastern (auto-adjusts EST/EDT)."""
+    dt = datetime.now(_ET)
+    tz = "EDT" if dt.dst() else "EST"
+    return dt.strftime(f"%B %d, %Y at %I:%M %p {tz}")
+
+
+def _pub_et(pub_str: str) -> str:
+    """Convert any RFC-2822 or ISO publish timestamp to Eastern Time display string."""
+    if not pub_str:
+        return _now_et()
+    try:
+        try:
+            dt = parsedate_to_datetime(pub_str)
+        except Exception:
+            dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt_et = dt.astimezone(_ET)
+        tz = "EDT" if dt_et.dst() else "EST"
+        return dt_et.strftime(f"%b %d, %Y · %I:%M %p {tz}")
+    except Exception:
+        return pub_str
+
+
 def _classify(item: dict) -> str:
     t = item["title"].lower()
     s = item["source"].lower()
@@ -1045,7 +1074,7 @@ def _generate_brief(item: dict) -> str:
 
 def _build_body(item: dict) -> str:
     """Plain-text fallback (for email clients that don't render HTML)."""
-    now_str = datetime.now(timezone.utc).strftime("%B %d, %Y at %I:%M %p UTC")
+    now_et  = _now_et()
     brief   = _generate_brief(item)
     lines = [
         "SONDERLING MEDIA HIT ALERT",
@@ -1054,7 +1083,7 @@ def _build_body(item: dict) -> str:
         f"Headline : {item['title']}",
         f"Source   : {item['source']}",
         f"Type     : {_classify(item)}",
-        f"Posted   : {item['published'] or now_str}",
+        f"Posted   : {_pub_et(item.get('published', ''))}",
         f"Link     : {item['link']}",
         "",
         "Brief",
@@ -1062,18 +1091,18 @@ def _build_body(item: dict) -> str:
         brief,
         "",
         "=" * 50,
-        f"Sonderling Monitor  |  {now_str}",
+        f"Sonderling Monitor  |  {now_et}",
     ]
     return "\n".join(lines)
 
 
 def _build_html_body(item: dict) -> str:
-    now_str   = datetime.now(timezone.utc).strftime("%b %d, %Y · %I:%M %p UTC")
+    now_str   = _now_et()
     kind      = _classify(item)
     brief     = _html.escape(_generate_brief(item))
     title_esc = _html.escape(item["title"])
     source_esc = _html.escape(item["source"])
-    pub_esc   = _html.escape(item.get("published") or now_str)
+    pub_esc   = _html.escape(_pub_et(item.get("published", "")))
     link      = item["link"]
 
     # Type badge color
