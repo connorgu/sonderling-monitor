@@ -1010,72 +1010,119 @@ def _classify(item: dict) -> str:
     return "media hit"
 
 
+def _generate_brief(item: dict) -> str:
+    """
+    2-3 sentence brief of what the article/post is about.
+    Uses snippet text when available; falls back to title-based description.
+    """
+    title   = item.get("title", "").strip()
+    snippet = re.sub(r"<[^>]+>", "", item.get("snippet", "")).strip()
+    link    = item.get("link", "").lower()
+    source  = item.get("source", "")
+    kind    = _classify(item)
+
+    # For tweets the snippet IS the full content — use it directly
+    if "x.com" in link or "twitter.com" in link:
+        text = snippet or re.sub(r"^@\w+:\s*", "", title)
+        return text[:400] if text else f"A post on X (Twitter) mentioning Secretary Sonderling via {source}."
+
+    # Clean snippet into sentences
+    if snippet and len(snippet) > 40:
+        # Split on sentence boundaries
+        sentences = re.split(r"(?<=[.!?])\s+", snippet)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+        if sentences:
+            return " ".join(sentences[:3])
+
+    # Fallback: descriptive sentence from metadata
+    src_name = source.split("(")[0].strip() or "this outlet"
+    return (
+        f"This {kind} from {src_name} covers the above headline regarding "
+        f"Secretary Keith Sonderling. "
+        f"Click the link below to read the full article."
+    )
+
+
 def _build_body(item: dict) -> str:
+    """Plain-text fallback (for email clients that don't render HTML)."""
     now_str = datetime.now(timezone.utc).strftime("%B %d, %Y at %I:%M %p UTC")
+    brief   = _generate_brief(item)
     lines = [
-        "Attention Secretary Sonderling,",
+        "SONDERLING MEDIA HIT ALERT",
+        "=" * 50,
         "",
-        f"A new {_classify(item)} has been published and your name is included.",
+        f"Headline : {item['title']}",
+        f"Source   : {item['source']}",
+        f"Type     : {_classify(item)}",
+        f"Posted   : {item['published'] or now_str}",
+        f"Link     : {item['link']}",
         "",
-        f"Headline  : {item['title']}",
-        f"Source    : {item['source']}",
-        f"Posted at : {item['published'] or now_str}",
-        f"Link      : {item['link']}",
-    ]
-    snippet = item.get("snippet", "").strip()
-    if snippet:
-        lines += ["", f"Preview   : {snippet[:300]}"]
-    lines += [
+        "Brief",
+        "-" * 30,
+        brief,
         "",
-        "─" * 60,
-        "",
-        f"— Sonderling Monitor  |  Alert generated {now_str}",
+        "=" * 50,
+        f"Sonderling Monitor  |  {now_str}",
     ]
     return "\n".join(lines)
 
 
 def _build_html_body(item: dict) -> str:
-    now_str = datetime.now(timezone.utc).strftime("%B %d, %Y at %I:%M %p UTC")
-    kind = _classify(item)
-    snippet = _html.escape(item.get("snippet", "").strip()[:300])
+    now_str   = datetime.now(timezone.utc).strftime("%b %d, %Y · %I:%M %p UTC")
+    kind      = _classify(item)
+    brief     = _html.escape(_generate_brief(item))
     title_esc = _html.escape(item["title"])
     source_esc = _html.escape(item["source"])
-    pub_esc = _html.escape(item["published"] or now_str)
-    link = item["link"]
-    snip_row = f'<tr><td style="color:#6b7280;padding:4px 0"><b>Preview</b></td><td style="padding:4px 0 4px 12px">{snippet}</td></tr>' if snippet else ""
-    return f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-  <div style="background:#1e3a5f;color:#fff;padding:16px 20px;border-radius:6px 6px 0 0">
-    <span style="font-size:11px;letter-spacing:1px;opacity:.75">SONDERLING MONITOR</span>
-    <h2 style="margin:4px 0 0;font-size:16px">{title_esc}</h2>
-  </div>
-  <div style="background:#f9fafb;padding:16px 20px;border:1px solid #e5e7eb;border-top:none">
-    <table style="width:100%;border-collapse:collapse;font-size:14px">
-      <tr><td style="color:#6b7280;padding:4px 0;white-space:nowrap"><b>Type</b></td><td style="padding:4px 0 4px 12px">{kind}</td></tr>
-      <tr><td style="color:#6b7280;padding:4px 0"><b>Source</b></td><td style="padding:4px 0 4px 12px">{source_esc}</td></tr>
-      <tr><td style="color:#6b7280;padding:4px 0"><b>Posted</b></td><td style="padding:4px 0 4px 12px">{pub_esc}</td></tr>
-      <tr><td style="color:#6b7280;padding:4px 0"><b>Link</b></td><td style="padding:4px 0 4px 12px"><a href="{link}" style="color:#1e3a5f">{link[:80]}{"..." if len(link)>80 else ""}</a></td></tr>
-      {snip_row}
-    </table>
-  </div>
-  <div style="padding:10px 20px;background:#fff;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 6px 6px;font-size:11px;color:#9ca3af">
-    Alert generated {now_str}
-  </div>
-</div>"""
+    pub_esc   = _html.escape(item.get("published") or now_str)
+    link      = item["link"]
 
+    # Type badge color
+    badge_colors = {
+        "X (Twitter) post": ("#e8f4fe", "#0369a1"),
+        "LinkedIn post":    ("#e8f5e9", "#166534"),
+        "video segment":    ("#fef3c7", "#92400e"),
+        "press release":    ("#f3e8ff", "#6b21a8"),
+        "opinion piece":    ("#fff1f2", "#9f1239"),
+    }
+    badge_bg, badge_fg = badge_colors.get(kind, ("#f0f4f8", "#1e3a5f"))
 
-def _subject_tag(item: dict) -> str:
-    """Short prefix so the email source is visible before opening."""
-    l = item.get("link", "").lower()
-    s = item["source"].lower()
-    if "linkedin.com"               in l: return "[LINKEDIN]"
-    if "twitter.com" in l or "x.com" in l: return "[X/TWITTER]"
-    if "reddit.com"  in l or "reddit" in s: return "[REDDIT]"
-    if "google alerts"              in s: return "[GOOGLE ALERT]"
-    if "bing web" in s: return "[WEB]"
-    if "whitehouse.gov"             in l: return "[WHITE HOUSE]"
-    if "dol.gov"                    in l: return "[DEPT OF LABOR]"
-    if "congress.gov"               in l: return "[CONGRESS]"
-    return f"[{item['source'].upper()[:14]}]"
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:24px 16px;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif">
+<div style="max-width:580px;margin:0 auto">
+
+  <!-- Header -->
+  <div style="background:linear-gradient(135deg,#0f2744 0%,#1e3a5f 100%);border-radius:10px 10px 0 0;padding:20px 24px">
+    <p style="margin:0 0 6px;font-size:10px;font-weight:700;letter-spacing:2px;color:#7db3e0;text-transform:uppercase">Sonderling Monitor · Media Alert</p>
+    <h1 style="margin:0;font-size:17px;font-weight:700;color:#ffffff;line-height:1.4">{title_esc}</h1>
+  </div>
+
+  <!-- Meta row -->
+  <div style="background:#ffffff;padding:14px 24px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span style="background:{badge_bg};color:{badge_fg};font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;letter-spacing:.5px;text-transform:uppercase">{kind}</span>
+    <span style="color:#64748b;font-size:13px">{source_esc}</span>
+    <span style="color:#cbd5e1;font-size:13px">·</span>
+    <span style="color:#64748b;font-size:13px">{pub_esc}</span>
+  </div>
+
+  <!-- Brief -->
+  <div style="background:#ffffff;padding:18px 24px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;border-top:1px solid #f1f5f9">
+    <p style="margin:0 0 8px;font-size:10px;font-weight:700;letter-spacing:1.5px;color:#94a3b8;text-transform:uppercase">Brief</p>
+    <p style="margin:0;font-size:14px;color:#334155;line-height:1.65">{brief}</p>
+  </div>
+
+  <!-- CTA -->
+  <div style="background:#ffffff;padding:16px 24px 20px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;border-top:1px solid #f1f5f9;border-radius:0 0 10px 10px">
+    <a href="{link}" style="display:inline-block;background:#1e3a5f;color:#ffffff;text-decoration:none;font-size:13px;font-weight:600;padding:10px 22px;border-radius:6px;letter-spacing:.3px">Read Full Article &rarr;</a>
+  </div>
+
+  <!-- Footer -->
+  <p style="text-align:center;margin:16px 0 0;font-size:11px;color:#94a3b8">
+    Sonderling Monitor &nbsp;·&nbsp; Alert generated {now_str}
+  </p>
+
+</div>
+</body></html>"""
 
 
 def send_alert(items: list[dict]) -> None:
@@ -1085,9 +1132,8 @@ def send_alert(items: list[dict]) -> None:
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
         srv.login(gmail_user, os.environ["GMAIL_APP_PASSWORD"])
         for item in items:
-            tag = _subject_tag(item)
             msg = MIMEMultipart("alternative")
-            msg["Subject"] = f"{tag} Keith Sonderling: {item['title'][:80]}"
+            msg["Subject"] = f"Sonderling Media Hit Alert! — {item['title'][:80]}"
             msg["From"]    = f"Sonderling Monitor <{gmail_user}>"
             msg["To"]      = ", ".join(recipients)
             msg.attach(MIMEText(_build_body(item), "plain"))
