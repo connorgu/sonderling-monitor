@@ -845,6 +845,46 @@ def _fetch_twitter_v2() -> list[dict]:
     return items
 
 
+# ── Sonderling identity verification ─────────────────────────────────────────
+#
+# "Sonderling" is also a surname held by other people (students, local figures).
+# Before firing an alert we require at least one word in title+snippet that
+# confirms this is about Keith Sonderling, U.S. Secretary of Labor, not a
+# random namesake.  "keith" alone is sufficient; otherwise a labor/DOL/Senate
+# context word is required.
+
+_KEITH_CONTEXT = frozenset({
+    "keith",
+    "secretary of labor", "labor secretary", "secretary sonderling",
+    "department of labor", "labor department",
+    "dol", "eeoc",
+    "sonderling47",
+    "acting secretary",
+    "secretary",          # broad but acceptable — "Secretary Sonderling" type refs
+    "labor",              # any labor-policy article mentioning Sonderling
+    "nominee", "nomination", "nominate",
+    "confirmation", "confirmed", "confirm",
+    "cloture", "senate vote", "senate floor",
+    "hearing",
+    "cabinet",
+    "trump", "white house",
+    "workforce",
+})
+
+
+def _verify_keith_sonderling(item: dict) -> bool:
+    """
+    Return True only if title+snippet gives evidence this is about
+    Keith Sonderling (Secretary of Labor), not another person named Sonderling.
+    Logs every drop so we can monitor for over-filtering.
+    """
+    text = (item.get("title", "") + " " + item.get("snippet", "")).lower()
+    if any(kw in text for kw in _KEITH_CONTEXT):
+        return True
+    print(f"    [drop-wrong-sonderling] {item.get('source','?')}: {item.get('title','')[:70]}")
+    return False
+
+
 # ── Concurrent fetch ──────────────────────────────────────────────────────────
 
 def fetch_all(seen: dict[str, str]) -> list[dict]:
@@ -925,20 +965,31 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
     print(f"  [fetch] {len(raw_items)} raw items across all sources")
 
     # Dedup pipeline (spec order):
-    #  1. seen_items.json   2. this-poll set   3. recency gate
-    this_poll: set[str] = set()
-    results:   list[dict] = []
+    #  1. seen_items.json   2. this-poll set   3. recency gate   4. Sonderling verification
+    this_poll_urls:   set[str] = set()
+    this_poll_titles: set[str] = set()   # title dedup — same article, different Google News CBM IDs
+    results: list[dict] = []
     for item in raw_items:
-        link = item.get("link", "")
+        link  = item.get("link", "")
+        title = re.sub(r"\s+", " ", item.get("title", "")).strip().lower()[:100]
         if not link:
             continue
-        if link in seen:                      # 1. cross-run dedup
+        if link in seen:                                          # 1a. cross-run URL dedup
             continue
-        if link in this_poll:                 # 2. within-poll dedup
+        if title and ("title:" + title) in seen:              # 1b. cross-run TITLE dedup
             continue
-        this_poll.add(link)
-        if _is_recent(item["published"], item["source"], item["title"]):  # 3. recency
-            results.append(item)
+        if link in this_poll_urls:                            # 2a. within-poll URL dedup
+            continue
+        if title and title in this_poll_titles:               # 2b. within-poll TITLE dedup
+            continue
+        this_poll_urls.add(link)
+        if title:
+            this_poll_titles.add(title)
+        if not _is_recent(item["published"], item["source"], item["title"]):  # 3. recency
+            continue
+        if not _verify_keith_sonderling(item):     # 4. confirm it's about Secretary Sonderling
+            continue
+        results.append(item)
 
     return results
 
@@ -1047,6 +1098,11 @@ def send_alert(items: list[dict]) -> None:
 
 # ── Poll loop ─────────────────────────────────────────────────────────────────
 
+def _title_key(title: str) -> str:
+    """Stable dedup key for an article title — tolerates minor Google News rewrites."""
+    return "title:" + re.sub(r"\s+", " ", title).strip().lower()[:80]
+
+
 def poll_once(seen: dict[str, str]) -> tuple[dict[str, str], int]:
     new_items = fetch_all(seen)
     if new_items:
@@ -1054,6 +1110,11 @@ def poll_once(seen: dict[str, str]) -> tuple[dict[str, str], int]:
         now_iso = datetime.now(timezone.utc).isoformat()
         for it in new_items:
             seen[it["link"]] = now_iso
+            # Also store title key so different Google News CBM IDs for the same
+            # article don't fire twice across separate GitHub Actions runs.
+            tk = _title_key(it.get("title", ""))
+            if tk != "title:":
+                seen[tk] = now_iso
         save_seen(seen)
         send_alert(new_items)
         if LOOP_DURATION == 0:
