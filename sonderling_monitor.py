@@ -48,6 +48,18 @@ SEARCH_TERMS = [
     '"Sonderling" "confirmed"',                    # confirmed as Secretary
     '"Sonderling" "vote"',                         # floor vote coverage
     '"Sonderling" "hearing"',                      # committee hearing references
+    # Post-confirmation regulatory & policy coverage
+    '"Sonderling" "FLSA"',                         # Fair Labor Standards Act rules
+    '"Sonderling" "overtime"',                     # overtime regulation changes
+    '"Sonderling" "H-1B"',                         # H-1B enforcement/policy
+    '"Sonderling" "NLRB"',                         # NLRB/union policy
+    '"Sonderling" "wage"',                         # wage rule coverage
+    '"Sonderling" "regulation"',                   # general regulatory news
+    '"Sonderling" "executive order"',              # EO coverage
+    '"Sonderling" "OSHA"',                         # OSHA enforcement
+    '"Sonderling" "workforce"',                    # workforce policy
+    '"Sonderling" "apprenticeship"',               # apprenticeship programs
+    '"Sonderling" "AI"',                           # AI/workforce intersection (his EEOC background)
 ]
 
 # Matched against title+description for direct outlet feeds (Tier 3).
@@ -111,18 +123,26 @@ DIRECT_FEEDS = [
     ("https://news.bloomberglaw.com/rss/daily-labor-report",    "Bloomberg Daily Labor"),
     ("https://www.hrdive.com/feeds/news/",                      "HR Dive"),
     ("https://ogletree.com/feed/",                              "Ogletree Deakins"),
-    # ── Additional working outlets (confirmed from local tests) ──────────────────
+    # ── Hill / DC insider outlets ─────────────────────────────────────────────────
     ("https://rollcall.com/feed/",                              "Roll Call"),
     ("https://rss.politico.com/politics-news.xml",              "Politico"),
+    ("https://punchbowl.news/feed/",                            "Punchbowl News"),
+    ("https://www.politico.com/rss/politicopicks.xml",          "Politico Picks"),
+    # ── Federal / government specialty ────────────────────────────────────────────
+    ("https://www.govexec.com/rss/all/",                        "Government Executive"),
+    ("https://federalnewsnetwork.com/feed/",                    "Federal News Network"),
+    ("https://www.govinfo.gov/rss/dcpd.xml",                    "White House Documents"),
+    # ── Employment / labor law ────────────────────────────────────────────────────
+    ("https://www.shrm.org/feeds/news/",                        "SHRM"),
+    ("https://www.jdsupra.com/feed/?topic=Labor-Employment",    "JD Supra Labor"),
+    ("https://www.littler.com/feed",                            "Littler Mendelson"),
     # Removed (confirmed dead/blocked from GitHub Actions IPs):
     # Reuters feeds.reuters.com — DNS failure (Name or service not known)
     # CNN rss.cnn.com — SSL EOF error
-    # Politico /rss/politicopicks.xml — 403 Forbidden
     # AP News apnews.com/rss — 403 Forbidden
     # DOL dol.gov/rss/releases.xml — 403 Forbidden (covered via Google News)
     # BLS bls.gov/feed/bls_latest.rss — 403 Forbidden
     # Congress congress.gov/rss — 404 Not Found
-    # Yahoo Politics /rss/politics — 404 Not Found
     # Washington Times — 403 Forbidden
     # C-SPAN /feeds/clips.rss — 404 Not Found
     # Newsmax /rss/Politics/16/ — read timeout
@@ -145,8 +165,14 @@ SOCIAL_SEARCH_TERMS = [
     '"Sonderling" site:x.com',                   # surname alone on X — catches body mentions
     '"Sonderling47"',                             # handle as standalone Bing search (not site:)
     '"Keith Sonderling" site:youtube.com',       # YouTube videos mentioning him
-    # Senate reporters who break floor/cloture news — site: searches pick up fast
+    '"Keith Sonderling" site:bsky.app',          # Bluesky posts (Bing indexes)
+    '"Sonderling" site:bsky.app',                # Bluesky surname mentions
+    # Senate/labor reporters on indexed sites
     '"Sonderling" site:c-span.org',              # C-SPAN coverage
+    '"Sonderling" site:punchbowl.news',          # Punchbowl Senate insider
+    '"Sonderling" site:rollcall.com',            # Roll Call floor coverage
+    '"Sonderling" site:bloomberg.com',           # Bloomberg full site
+    '"Sonderling" site:bloomberglaw.com',        # Bloomberg Law full site
 ]
 
 # Nitter — open-source Twitter frontend with RSS support; real-time, no API key.
@@ -158,19 +184,35 @@ NITTER_INSTANCES = [
     "nitter.1d4.us",
     "nitter.poast.org",
     "nitter.catsarch.com",
+    "nitter.woodland.cafe",
+    "nitter.unixfox.eu",
 ]
 
 # High-value Twitter accounts to monitor directly via Nitter user-timeline RSS.
 # These are the journalists and officials who break Sonderling news first.
 NITTER_ACCOUNTS = [
-    ("Sonderling47",    False),  # Sonderling himself — all his posts are relevant
-    ("CraigCaplan",     True),   # C-SPAN Capitol Hill reporter — broke cloture tweet
-    ("sahilkapur",      True),   # NBC News Congress reporter
-    ("frankthorp",      True),   # NBC News Capitol Hill
-    ("DOL",             True),   # Dept of Labor official account
-    ("WhiteHouseGov",   True),   # White House announcements
-    ("SenateGOP",       True),   # Senate Republican caucus
-    ("POTUS",           True),   # Presidential announcements
+    ("Sonderling47",       False),  # Sonderling himself — all his posts are relevant
+    ("CraigCaplan",        True),   # C-SPAN Capitol Hill reporter — broke cloture tweet
+    ("sahilkapur",         True),   # NBC News Congress reporter
+    ("frankthorp",         True),   # NBC News Capitol Hill
+    ("DOL",                True),   # Dept of Labor official account
+    ("WhiteHouseGov",      True),   # White House announcements
+    ("SenateGOP",          True),   # Senate Republican caucus
+    ("POTUS",              True),   # Presidential announcements
+    # Additional Senate floor / confirmation reporters
+    ("ChadPergram",        True),   # Fox News Senate floor reporter — fastest floor coverage
+    ("AlexThomp",          True),   # Washington Post Senate/confirmation reporter
+    ("mkraju",             True),   # CNN congressional reporter
+    ("AndrewDesiderio",    True),   # Punchbowl News Senate specialist
+    ("seungminkim",        True),   # Washington Post White House/Senate
+    ("morningmoneyben",    True),   # Politico Morning Money — DOL/labor policy
+    # Labor / employment law reporters
+    ("BloombergLaw",       True),   # Bloomberg Law — catches DOL regulatory news
+    ("HRDive",             True),   # HR Dive labor news
+    # Official government accounts
+    ("WHDOC",              True),   # White House Director of Communications
+    ("PressSec",           True),   # White House Press Secretary
+    ("SenateMajLdr",       True),   # Senate Majority Leader
 ]
 
 # Twitter search queries via Nitter — real-time Twitter search, no auth needed
@@ -182,6 +224,26 @@ NITTER_SEARCH_TERMS = [
     '"Sonderling" confirmation',
     '"Sonderling" senate',
     'Sonderling47',
+    # Post-confirmation regulatory coverage
+    '"Sonderling" FLSA',
+    '"Sonderling" overtime',
+    '"Sonderling" "H-1B"',
+    '"Sonderling" OSHA',
+    '"Sonderling" DOL',
+    '"Sonderling" regulation',
+]
+
+# Bluesky accounts to monitor via native RSS (bsky.app/profile/{handle}/rss).
+# Many Hill/labor journalists migrated from Twitter to Bluesky — this catches them.
+BLUESKY_ACCOUNTS = [
+    ("craigcaplan.bsky.social",       True),   # C-SPAN Capitol Hill
+    ("sahilkapur.bsky.social",        True),   # NBC News Congress
+    ("alexthomson.bsky.social",       True),   # Washington Post Senate
+    ("mkraju.bsky.social",            True),   # CNN congressional
+    ("seungminkim.bsky.social",       True),   # WaPo White House/Senate
+    ("andrewdesiderio.bsky.social",   True),   # Punchbowl News
+    ("frankthorp.bsky.social",        True),   # NBC News Capitol Hill
+    ("dol.gov.bsky.social",           True),   # DOL official (if exists)
 ]
 
 # Optional: Twitter API v2 Essential (free tier) — 15 req/15min, real-time.
@@ -606,6 +668,12 @@ def _fetch_web_search(query: str, label: str, first: int = 1) -> list[dict]:
     items: list[dict] = []
     text = raw.decode("utf-8", errors="replace")
 
+    # Detect Bing bot-protection (returns HTML CAPTCHA / "Access Denied" page, not results)
+    if "<h2>Access Denied</h2>" in text or "captcha" in text.lower() or \
+       ("Sorry, something went wrong" in text and "<h2>" not in text[:5000]):
+        print(f"  [warn] Bing Web bot-detection response for: {query[:50]}")
+        return []
+
     def _clean(html_frag: str) -> str:
         return _html.unescape(re.sub(r"<[^>]+>", "", html_frag)).strip()
 
@@ -677,6 +745,11 @@ def _fetch_bing_news(query: str, label: str) -> list[dict]:
     if not raw:
         return []
     text = raw.decode("utf-8", errors="replace")
+
+    if "<h2>Access Denied</h2>" in text or "captcha" in text.lower():
+        print(f"  [warn] Bing News bot-detection response for: {query[:50]}")
+        return []
+
     items: list[dict] = []
 
     def _clean(s: str) -> str:
@@ -779,6 +852,51 @@ def _fetch_nitter(path: str, label: str, keyword_filter: bool) -> list[dict]:
     return []
 
 
+def _fetch_bluesky(handle: str, label: str, keyword_filter: bool) -> list[dict]:
+    """
+    Bluesky native RSS — bsky.app provides RSS at /profile/{handle}/rss.
+    No auth required. Many Hill/labor journalists have migrated here from Twitter.
+    """
+    url = f"https://bsky.app/profile/{handle}/rss"
+    raw = _get(url, timeout=10, retry=False)
+    if not raw:
+        return []
+    head = raw[:300]
+    if b"<rss" not in head and b"<?xml" not in head and b"<feed" not in head:
+        return []
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return []
+
+    items: list[dict] = []
+    for el in root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry"):
+        link  = (el.findtext("link") or "").strip()
+        if not link:
+            link_el = el.find("{http://www.w3.org/2005/Atom}link")
+            link = (link_el.get("href") if link_el is not None else "") or ""
+        if not link:
+            continue
+        title = (el.findtext("title") or el.findtext("{http://www.w3.org/2005/Atom}title") or "").strip()
+        desc  = (el.findtext("description") or el.findtext("{http://www.w3.org/2005/Atom}content") or "").strip()
+        if keyword_filter:
+            txt = (title + " " + re.sub(r"<[^>]+>", "", desc)).lower()
+            if not any(kw in txt for kw in KEYWORDS) and \
+               "secretary of labor" not in txt and "labor secretary" not in txt:
+                continue
+        pub = (el.findtext("pubDate") or
+               el.findtext("{http://www.w3.org/2005/Atom}published") or
+               el.findtext("{http://www.w3.org/2005/Atom}updated") or "").strip()
+        items.append({
+            "title":     title,
+            "link":      _canonical(link),
+            "published": pub,
+            "source":    f"Bluesky/@{handle.split('.')[0]}",
+            "snippet":   re.sub(r"<[^>]+>", "", _html.unescape(desc))[:200],
+        })
+    return items
+
+
 def _fetch_twitter_v2() -> list[dict]:
     """
     Twitter API v2 recent search — free Essential tier, up to 100 tweets/call.
@@ -864,6 +982,9 @@ _SONDERLING_STRONG = frozenset({
     "department of labor", "labor department",
     "dol", "eeoc", "sonderling47",
     "acting secretary", "acting labor",
+    # Post-confirmation strong signals
+    "labor secretary sonderling", "secretary keith",
+    "31st secretary", "31st labor",
 })
 
 # Words that confirm a government/policy context — need "sonderling" OR "keith"
@@ -874,6 +995,10 @@ _SONDERLING_CONTEXT = frozenset({
     "cabinet", "trump", "white house", "workforce", "hearing",
     "department", "administration", "policy", "regulation", "wage",
     "dol", "eeoc", "federal", "oversight", "committee",
+    # Post-confirmation regulatory terms
+    "flsa", "overtime", "h-1b", "osha", "nlrb", "apprenticeship",
+    "sworn in", "regulatory", "rulemaking", "enforcement",
+    "executive order", "employer", "employee rights",
 })
 
 
@@ -955,6 +1080,9 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
         tasks.append(("nitter", f"search/rss?q={enc}&f=tweets", "Twitter Search", False))
     # Twitter API v2 (optional — set TWITTER_BEARER_TOKEN GitHub secret for fastest alerts)
     tasks.append(("twitter_v2", None, "Twitter API v2", None))
+    # Bluesky RSS — Hill/labor reporters who migrated from Twitter; native RSS, no auth
+    for handle, kw_filter in BLUESKY_ACCOUNTS:
+        tasks.append(("bluesky", handle, f"Bluesky/@{handle.split('.')[0]}", kw_filter))
 
     print(f"  [fetch] launching {len(tasks)} concurrent requests …")
 
@@ -970,6 +1098,8 @@ def fetch_all(seen: dict[str, str]) -> list[dict]:
                 futures.append(pool.submit(_fetch_bing_news, url, label))
             elif kind == "nitter":
                 futures.append(pool.submit(_fetch_nitter, url, label, aux if aux is not None else True))
+            elif kind == "bluesky":
+                futures.append(pool.submit(_fetch_bluesky, url, label, aux if aux is not None else True))
             elif kind == "twitter_v2":
                 futures.append(pool.submit(_fetch_twitter_v2))
             else:  # web — aux is the `first` page offset (1 or 11)
