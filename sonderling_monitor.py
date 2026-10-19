@@ -464,6 +464,26 @@ def _tweet_age_minutes(url: str) -> float | None:
 
 # ── Network ───────────────────────────────────────────────────────────────────
 
+def _resolve_gnews_url(url: str) -> str:
+    """
+    Google News RSS serves CBM redirect URLs (news.google.com/rss/articles/CBMi...).
+    These frequently fail in email — they require JS, redirect to the app, or expire.
+    Follow the redirect once to get the actual article URL before putting it in an alert.
+    Called only for items about to be sent (~5/day), so one extra network request is fine.
+    """
+    if "news.google.com" not in url:
+        return url
+    try:
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            final = r.geturl()
+            if final and "news.google.com" not in final and final.startswith("http"):
+                return _canonical(final)
+    except Exception as exc:
+        print(f"  [warn] gnews-resolve failed ({url[:60]}): {exc}")
+    return url
+
+
 def _get(url: str, timeout: int = 15, retry: bool = True) -> bytes | None:
     attempts = 2 if retry else 1
     for attempt in range(attempts):
@@ -695,8 +715,7 @@ def _fetch_web_search(query: str, label: str, first: int = 1) -> list[dict]:
             snip_raw_clean = snip_raw
             snip     = _clean(snip_raw)
             combined = (title + " " + snip).lower()
-            if not any(kw in combined for kw in KEYWORDS) and \
-               "secretary of labor" not in combined and "labor secretary" not in combined:
+            if not any(kw in combined for kw in KEYWORDS):
                 continue
 
             # ── DATE VERIFICATION ─────────────────────────────────────────
@@ -773,8 +792,7 @@ def _fetch_bing_news(query: str, label: str) -> list[dict]:
                 continue
             ctx = _clean(context)
             combined = (title + " " + ctx).lower()
-            if not any(kw in combined for kw in KEYWORDS) and \
-               "secretary of labor" not in combined and "labor secretary" not in combined:
+            if not any(kw in combined for kw in KEYWORDS):
                 continue
 
             tweet_age = _tweet_age_minutes(href)
@@ -975,26 +993,30 @@ def _fetch_twitter_v2() -> list[dict]:
 # random namesake.  "keith" alone is sufficient; otherwise a labor/DOL/Senate
 # context word is required.
 
-# Words that ALONE confirm the article is about Secretary Sonderling —
-# no other Sonderling would appear in this context.
+# Phrases that UNIQUELY identify Keith Sonderling — these include his name or handle.
+# "secretary of labor" / "labor secretary" / "dol" alone are NOT here because they
+# apply to every labor secretary (Lori Chavez-DeRemer, etc.), not just Sonderling.
 _SONDERLING_STRONG = frozenset({
-    "secretary of labor", "labor secretary", "secretary sonderling",
-    "department of labor", "labor department",
-    "dol", "eeoc", "sonderling47",
-    "acting secretary", "acting labor",
-    # Post-confirmation strong signals
-    "labor secretary sonderling", "secretary keith",
-    "31st secretary", "31st labor",
+    "keith sonderling",            # full name
+    "secretary sonderling",        # title + surname (how press addresses him)
+    "labor secretary sonderling",  # DOL title + surname
+    "sonderling47",                # his X/Twitter handle — globally unique
+    "secretary keith sonderling",  # full formal address
+    "sonderling labor secretary",  # alternate order
+    "31st secretary of labor",     # his specific ordinal position
+    "31st labor secretary",
 })
 
-# Words that confirm a government/policy context — need "sonderling" OR "keith"
-# PLUS at least one of these to distinguish the Secretary from a local namesake.
+# Words that confirm government/labor context — need "sonderling" (surname)
+# PLUS at least one of these. "keith" alone is also not enough (name collision risk).
 _SONDERLING_CONTEXT = frozenset({
     "secretary", "labor", "nominee", "nomination", "nominate",
     "confirmation", "confirmed", "cloture", "senate", "senate vote",
     "cabinet", "trump", "white house", "workforce", "hearing",
     "department", "administration", "policy", "regulation", "wage",
+    "secretary of labor", "labor secretary", "department of labor",
     "dol", "eeoc", "federal", "oversight", "committee",
+    "acting secretary", "acting labor",
     # Post-confirmation regulatory terms
     "flsa", "overtime", "h-1b", "osha", "nlrb", "apprenticeship",
     "sworn in", "regulatory", "rulemaking", "enforcement",
@@ -1327,6 +1349,19 @@ def _title_key(title: str) -> str:
 
 def poll_once(seen: dict[str, str]) -> tuple[dict[str, str], int]:
     new_items = fetch_all(seen)
+    if new_items:
+        # Resolve Google News CBM redirect URLs to actual article URLs.
+        # Also deduplicate again — different CBM IDs can resolve to the same article.
+        resolved: list[dict] = []
+        for it in new_items:
+            real = _resolve_gnews_url(it["link"])
+            if real in seen:
+                print(f"  [dedup-resolved] {real[:80]}")
+                continue
+            it["link"] = real
+            resolved.append(it)
+        new_items = resolved
+
     if new_items:
         # Mark seen BEFORE sending — prevents double-alert if SMTP fails mid-batch
         now_iso = datetime.now(timezone.utc).isoformat()
